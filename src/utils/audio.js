@@ -98,6 +98,63 @@ class SoundEngine {
       // Ignore audio error
     }
   }
+
+  playPendingAlert() {
+    if (this.isMuted) return;
+    try {
+      this.init();
+      if (!this.ctx) return;
+      if (this.ctx.state === "suspended") this.ctx.resume();
+
+      // Dual-tone urgent alert chime for incoming pending counter approvals (F5 -> A5)
+      [698.46, 880.00].forEach((freq, idx) => {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(freq, this.ctx.currentTime + idx * 0.12);
+
+        gain.gain.setValueAtTime(0.18, this.ctx.currentTime + idx * 0.12);
+        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + idx * 0.12 + 0.35);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+
+        osc.start(this.ctx.currentTime + idx * 0.12);
+        osc.stop(this.ctx.currentTime + idx * 0.12 + 0.36);
+      });
+    } catch {
+      // Ignore audio error
+    }
+  }
+
+  playError() {
+    if (this.isMuted) return;
+    try {
+      this.init();
+      if (!this.ctx) return;
+      if (this.ctx.state === "suspended") this.ctx.resume();
+
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(220, this.ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(110, this.ctx.currentTime + 0.2);
+
+      gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.2);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+
+      osc.start();
+      osc.stop(this.ctx.currentTime + 0.2);
+    } catch {
+      // Ignore audio error
+    }
+  }
 }
 
 export const sound = new SoundEngine();
+

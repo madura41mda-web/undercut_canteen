@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   ChefHat,
@@ -24,7 +24,7 @@ import {
 import { sound } from "../utils/audio";
 import AddDishModal from "./AddDishModal";
 import { can } from "../lib/role";
-import { CanteenService, QUICK_PREP_MAX_MINUTES } from "../services/canteenState";
+import { CanteenService, QUICK_PREP_MAX_MINUTES, isCancelledAutoHidden } from "../services/canteenState";
 
 export default function KitchenCommandCenter({
   orders = [],
@@ -41,6 +41,15 @@ export default function KitchenCommandCenter({
   const [addDishModalOpen, setAddDishModalOpen] = useState(false);
   const [savingOrderId, setSavingOrderId] = useState(null);
   const [toast, setToast] = useState(null); // { message, type }
+  const [autoHideTicker, setAutoHideTicker] = useState(0);
+
+  // 30-second interval ticker to re-evaluate auto-hidden cancelled orders
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setAutoHideTicker((v) => v + 1);
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Verify Pickup State
   const [pickupQuery, setPickupQuery] = useState("");
@@ -67,7 +76,11 @@ export default function KitchenCommandCenter({
   const queuedOrders = useMemo(() => orders.filter(o => o.status === "Placed" || o.status === "Accepted"), [orders]);
   const preparingOrders = useMemo(() => orders.filter(o => o.status === "Preparing"), [orders]);
   const readyOrders = useMemo(() => orders.filter(o => o.status === "Ready"), [orders]);
-  const cancelledOrders = useMemo(() => orders.filter(o => o.status === "Cancelled"), [orders]);
+  const cancelledOrders = useMemo(() => {
+    void autoHideTicker;
+    return orders.filter(o => o.status === "Cancelled" && !isCancelledAutoHidden(o));
+  }, [orders, autoHideTicker]);
+
 
   // Overall load calculations
   const activeOrdersCount = queuedOrders.length + preparingOrders.length;

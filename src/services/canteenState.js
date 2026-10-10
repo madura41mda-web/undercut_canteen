@@ -1,16 +1,7 @@
 /**
- * CanteenService — Supabase-backed implementation.
- *
- * Design contract kept from the localStorage version:
- *  - Synchronous reads:  getMenu(), getOrders(), getSettings(), getActiveOrder()
- *  - Async writes:       createOrder(), updateOrderStatus(), cancelOrder(),
- *                        updateMenuItemStock(), updateMenuItem(), updateSettings(),
- *                        restockItem(), setItemStock(), demoReset(), addMenuItem(),
- *                        archiveMenuItem(), unarchiveMenuItem(), verifyPickup()
- *  - Slot generation:    calculateFeasibleSlots() — async, returns a Promise<Slot[]>
- *  - Batch detection:    detectBatches() — synchronous, derived from in-memory orders
- *
- * Row → camelCase adapter keeps all component field references intact.
+ * CanteenService — Supabase-backed implementation with WebSocket Resilience,
+ * 5-Second Polling Fallback, Timezone Standardization & Friendly Error Mapping.
+ * Team: UNDERCUT DEV | Problem Statement 76
  */
 
 import { supabase } from "../lib/supabaseClient";
@@ -18,6 +9,7 @@ import { RoleService } from "../lib/role";
 
 export const QUICK_PREP_MAX_MINUTES = 8;
 export const USN_REGEX = /^1GA[0-9]{2}CS[0-9]{3}$/;
+export const NAME_REGEX = /^[A-Za-z\s.'-]{2,50}$/;
 
 const STUDENT_USN_KEY = "smartcanteen_student_usn";
 const STUDENT_NAME_KEY = "smartcanteen_student_name";
@@ -38,6 +30,63 @@ export function getStoredStudentName() {
 export function setStoredStudentName(name) {
   if (name) sessionStorage.setItem(STUDENT_NAME_KEY, name.trim());
   else sessionStorage.removeItem(STUDENT_NAME_KEY);
+}
+
+// ─────────────────────────────────────────────
+// Friendly Error Mapping & Technical Logging
+// ─────────────────────────────────────────────
+
+export function sanitizeErrorMessage(err) {
+  if (!err) return "Something went wrong, please try again.";
+  const raw = typeof err === "string" ? err : err.message || JSON.stringify(err);
+  console.error("[CanteenService Technical Error]:", err);
+
+  if (raw.includes("v_settings") || raw.includes("timezone")) {
+    return "Order system encountered a temporary glitch. Please try again.";
+  }
+  if (raw.includes("invalid_name") || raw.includes("Student name is required")) {
+    return "Student name is required (2 to 50 characters; letters, spaces, dots, and hyphens only).";
+  }
+  if (raw.includes("invalid_usn") || raw.includes("orders_student_roll_format")) {
+    return "Invalid college USN format. Please enter a valid USN (e.g. 1GA24CS012).";
+  }
+  if (raw.includes("canteen_closed")) {
+    return "The canteen is currently closed. Please check back during operating hours.";
+  }
+  if (raw.includes("sold_out")) {
+    return "One or more items in your cart just sold out. Please review your cart.";
+  }
+  if (raw.includes("temporarily_unavailable")) {
+    return "One or more items in your cart are temporarily unavailable.";
+  }
+  if (raw.includes("capacity_full")) {
+    return "The kitchen is currently at peak capacity. Please select an available future pickup slot.";
+  }
+  if (raw.includes("forbidden_role") || raw.includes("forbidden")) {
+    return "Permission denied. Please verify your staff credentials.";
+  }
+  if (raw.includes("forbidden_usn_mismatch")) {
+    return "Permission denied: Students can only cancel their own orders.";
+  }
+  if (raw.includes("illegal_transition")) {
+    return "Order cannot transition to this state.";
+  }
+  if (raw.includes("Failed to fetch") || raw.includes("NetworkError") || raw.includes("network")) {
+    return "Connection issue. Reconnecting to canteen servers...";
+  }
+  return "Something went wrong, please try again.";
+}
+
+// ─────────────────────────────────────────────
+// Cancelled Order Auto-Hide Helper (5-minute window)
+// ─────────────────────────────────────────────
+
+export function isCancelledAutoHidden(order) {
+  if (!order || order.status !== "Cancelled") return false;
+  if (!order.cancelledAt) return false;
+  const cancelledTime = new Date(order.cancelledAt).getTime();
+  if (isNaN(cancelledTime)) return false;
+  return Date.now() - cancelledTime > 5 * 60 * 1000;
 }
 
 // ─────────────────────────────────────────────
@@ -78,13 +127,12 @@ function adaptOrderItem(row) {
   };
 }
 
-function adaptOrder(row) {
+function adaptOrder(row, timezone = "Asia/Kolkata") {
   if (!row) return null;
   const items = Array.isArray(row.items)
     ? row.items.map(adaptOrderItem)
     : [];
 
-  // promisedPickupTime: display string (HH:MM AM/PM) from timestamptz
   let promisedPickupTimeDisplay = "";
   let promisedPickupTimeISO = row.promised_pickup_time;
   if (row.promised_pickup_time) {
@@ -92,7 +140,7 @@ function adaptOrder(row) {
       promisedPickupTimeDisplay = new Date(row.promised_pickup_time).toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
-        timeZone: "Asia/Kolkata",
+        timeZone: timezone,
       });
     } catch {
       promisedPickupTimeDisplay = row.promised_pickup_time;
@@ -139,21 +187,27 @@ function adaptSettings(row) {
     demoMode: row.demo_mode,
     pendingExpiryMinutes: row.pending_expiry_minutes ?? 10,
     counterApprover: row.counter_approver ?? "manager",
+    timezone: row.timezone || "Asia/Kolkata",
   };
 }
 
 // ─────────────────────────────────────────────
-// In-memory cache (keeps synchronous reads alive)
+// In-memory cache & Realtime / Polling State
 // ─────────────────────────────────────────────
 
 let _menu = [];
 let _orders = [];
-let _settings = {};
-let _activeOrderId = null; // token-style id  e.g. "CN-0001"
+let _settings = { timezone: "Asia/Kolkata" };
+let _activeOrderId = null;
 let _changeListeners = [];
 let _initialized = false;
 let _initPromise = null;
 let _realtimeStatus = "disconnected"; // "connected" | "reconnecting" | "disconnected"
+let _lastUpdated = null;
+let _realtimeChannel = null;
+let _reconnectTimeout = null;
+let _reconnectAttempts = 0;
+let _fallbackPollInterval = null;
 
 function notify() {
   _changeListeners.forEach((fn) => fn());
@@ -171,45 +225,59 @@ function _dedupeMenu(items) {
 }
 
 // ─────────────────────────────────────────────
-// Initialisation & Realtime
+// Initialisation, Realtime & Fallback Polling
 // ─────────────────────────────────────────────
 
 async function _loadAll() {
-  const [menuRes, ordersRes, settingsRes, orderItemsRes] = await Promise.all([
-    supabase.from("menu_items").select("*").order("id"),
-    supabase
-      .from("orders")
-      .select("*")
-      .order("placed_at", { ascending: false }),
-    supabase.from("kitchen_settings").select("*").single(),
-    supabase.from("order_items").select("*"),
-  ]);
+  try {
+    const [menuRes, ordersRes, settingsRes, orderItemsRes] = await Promise.all([
+      supabase.from("menu_items").select("*").order("id"),
+      supabase.from("orders").select("*").order("placed_at", { ascending: false }),
+      supabase.from("kitchen_settings").select("*").single(),
+      supabase.from("order_items").select("*"),
+    ]);
 
-  if (menuRes.error) console.error("[CanteenService] menu load error:", menuRes.error);
-  if (ordersRes.error) console.error("[CanteenService] orders load error:", ordersRes.error);
-  if (settingsRes.error) console.error("[CanteenService] settings load error:", settingsRes.error);
-  if (orderItemsRes.error) console.error("[CanteenService] order_items load error:", orderItemsRes.error);
+    if (menuRes.error) console.error("[CanteenService] menu load error:", menuRes.error);
+    if (ordersRes.error) console.error("[CanteenService] orders load error:", ordersRes.error);
+    if (settingsRes.error) console.error("[CanteenService] settings load error:", settingsRes.error);
+    if (orderItemsRes.error) console.error("[CanteenService] order_items load error:", orderItemsRes.error);
 
-  // Build order→items map
-  const itemsByOrder = {};
-  (orderItemsRes.data ?? []).forEach((oi) => {
-    if (!itemsByOrder[oi.order_id]) itemsByOrder[oi.order_id] = [];
-    itemsByOrder[oi.order_id].push(oi);
-  });
+    _settings = adaptSettings(settingsRes.data);
+    const tz = _settings.timezone || "Asia/Kolkata";
 
-  _menu = _dedupeMenu((menuRes.data ?? []).map(adaptMenuItem));
-  _orders = (ordersRes.data ?? []).map((o) =>
-    adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] })
-  );
-  _settings = adaptSettings(settingsRes.data);
+    // Build order→items map
+    const itemsByOrder = {};
+    (orderItemsRes.data ?? []).forEach((oi) => {
+      if (!itemsByOrder[oi.order_id]) itemsByOrder[oi.order_id] = [];
+      itemsByOrder[oi.order_id].push(oi);
+    });
+
+    _menu = _dedupeMenu((menuRes.data ?? []).map(adaptMenuItem));
+    _orders = (ordersRes.data ?? []).map((o) =>
+      adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] }, tz)
+    );
+    _lastUpdated = new Date();
+  } catch (err) {
+    console.error("[CanteenService] _loadAll error:", err);
+  }
 }
 
 function _setupRealtime() {
-  supabase
+  if (_realtimeChannel) {
+    try {
+      supabase.removeChannel(_realtimeChannel);
+    } catch {
+      // ignore teardown error
+    }
+    _realtimeChannel = null;
+  }
+
+  _realtimeChannel = supabase
     .channel("smartcanteen-realtime")
     .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, async () => {
       const { data } = await supabase.from("menu_items").select("*").order("id");
       _menu = _dedupeMenu((data ?? []).map(adaptMenuItem));
+      _lastUpdated = new Date();
       notify();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, async () => {
@@ -222,9 +290,11 @@ function _setupRealtime() {
         if (!itemsByOrder[oi.order_id]) itemsByOrder[oi.order_id] = [];
         itemsByOrder[oi.order_id].push(oi);
       });
+      const tz = _settings.timezone || "Asia/Kolkata";
       _orders = (ordersRes.data ?? []).map((o) =>
-        adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] })
+        adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] }, tz)
       );
+      _lastUpdated = new Date();
       notify();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "order_items" }, async () => {
@@ -237,29 +307,81 @@ function _setupRealtime() {
         if (!itemsByOrder[oi.order_id]) itemsByOrder[oi.order_id] = [];
         itemsByOrder[oi.order_id].push(oi);
       });
+      const tz = _settings.timezone || "Asia/Kolkata";
       _orders = (ordersRes.data ?? []).map((o) =>
-        adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] })
+        adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] }, tz)
       );
+      _lastUpdated = new Date();
       notify();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "kitchen_settings" }, async () => {
       const { data } = await supabase.from("kitchen_settings").select("*").single();
       _settings = adaptSettings(data);
+      _lastUpdated = new Date();
       notify();
     })
     .subscribe((status) => {
       if (status === "SUBSCRIBED") {
-        const wasReconnecting = _realtimeStatus === "reconnecting";
         _realtimeStatus = "connected";
-        if (wasReconnecting) {
-          _loadAll().then(notify);
-        }
-        notify();
+        _reconnectAttempts = 0;
+        _loadAll().then(notify);
       } else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-        _realtimeStatus = "reconnecting";
+        _realtimeStatus = navigator.onLine ? "reconnecting" : "disconnected";
         notify();
+        _scheduleResubscribe();
       }
     });
+}
+
+function _scheduleResubscribe() {
+  if (_reconnectTimeout) clearTimeout(_reconnectTimeout);
+  _reconnectAttempts += 1;
+  const delay = Math.min(30000, Math.pow(1.5, _reconnectAttempts) * 2000);
+  _reconnectTimeout = setTimeout(() => {
+    if (navigator.onLine) {
+      _setupRealtime();
+    }
+  }, delay);
+}
+
+// Setup background fallback polling (every 5 seconds when realtime is not connected)
+// and window focus / visibility change listeners
+function _setupResilienceListeners() {
+  if (typeof window === "undefined") return;
+
+  // 5-second polling fallback
+  if (!_fallbackPollInterval) {
+    _fallbackPollInterval = setInterval(() => {
+      // Poll every 5s if not in connected state or to keep student/manager views guaranteed fresh
+      if (_realtimeStatus !== "connected" || document.visibilityState === "visible") {
+        _loadAll().then(notify);
+      }
+    }, 5000);
+  }
+
+  // Refetch on window focus
+  window.addEventListener("focus", () => {
+    _loadAll().then(notify);
+  });
+
+  // Refetch on tab visibility change
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      _loadAll().then(notify);
+    }
+  });
+
+  // Network online/offline
+  window.addEventListener("online", () => {
+    _realtimeStatus = "reconnecting";
+    _setupRealtime();
+    _loadAll().then(notify);
+  });
+
+  window.addEventListener("offline", () => {
+    _realtimeStatus = "disconnected";
+    notify();
+  });
 }
 
 // ─────────────────────────────────────────────
@@ -275,6 +397,7 @@ export const CanteenService = {
     _initPromise = _loadAll().then(() => {
       _initialized = true;
       _setupRealtime();
+      _setupResilienceListeners();
       notify();
     });
     return _initPromise;
@@ -292,7 +415,34 @@ export const CanteenService = {
   },
 
   getRealtimeStatus() {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return "disconnected";
+    }
     return _realtimeStatus;
+  },
+
+  getLastUpdated() {
+    return _lastUpdated;
+  },
+
+  getLastUpdatedFormatted() {
+    if (!_lastUpdated) return "Syncing…";
+    try {
+      const tz = _settings.timezone || "Asia/Kolkata";
+      return _lastUpdated.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZone: tz,
+      });
+    } catch {
+      return _lastUpdated.toLocaleTimeString();
+    }
+  },
+
+  async refresh() {
+    await _loadAll();
+    notify();
   },
 
   // ── Synchronous reads (in-memory cache) ────────────────────────────
@@ -330,7 +480,16 @@ export const CanteenService = {
 
   async createOrder({ items, studentName, studentRoll, pickupSlot, instructions, paymentMethod, priority }) {
     const usn = (studentRoll || getStoredStudentUSN() || "").toUpperCase().trim();
-    const name = (studentName || getStoredStudentName() || "").trim() || "Student";
+    const name = (studentName || getStoredStudentName() || "").trim();
+
+    // Client-side mandatory validation before calling RPC
+    if (!name || !NAME_REGEX.test(name)) {
+      return {
+        ok: false,
+        reason: "invalid_name",
+        message: "Student name is required (2 to 50 characters; letters, spaces, dots, and hyphens only).",
+      };
+    }
 
     if (!USN_REGEX.test(usn)) {
       return {
@@ -363,8 +522,8 @@ export const CanteenService = {
     });
 
     if (error) {
-      console.error("[CanteenService] place_order error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      const friendlyMsg = sanitizeErrorMessage(error);
+      return { ok: false, reason: "server_error", message: friendlyMsg };
     }
 
     const result = data;
@@ -374,11 +533,12 @@ export const CanteenService = {
         reason: result.reason,
         unavailable: result.unavailable ?? [],
         alternatives: result.alternatives ?? { items: [], slots: [] },
-        message: _reasonToMessage(result.reason, result.unavailable),
+        message: result.message || _reasonToMessage(result.reason, result.unavailable),
       };
     }
 
-    const adaptedOrder = adaptOrder(result.order);
+    const tz = _settings.timezone || "Asia/Kolkata";
+    const adaptedOrder = adaptOrder(result.order, tz);
     _activeOrderId = adaptedOrder.id;
     return {
       ok: true,
@@ -402,8 +562,7 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] update_order_status error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
     }
     if (!data?.ok) {
       return {
@@ -413,8 +572,10 @@ export const CanteenService = {
       };
     }
     if (data.order) {
-      const adapted = adaptOrder(data.order);
+      const tz = _settings.timezone || "Asia/Kolkata";
+      const adapted = adaptOrder(data.order, tz);
       _orders = _orders.map((o) => (o.id === adapted.id || o._uuid === adapted._uuid ? adapted : o));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -427,13 +588,13 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] verify_pickup error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
     }
     if (!data?.ok) {
       return { ok: false, reason: data?.reason, message: data?.message || "Order not found." };
     }
-    return { ok: true, order: adaptOrder(data.order) };
+    const tz = _settings.timezone || "Asia/Kolkata";
+    return { ok: true, order: adaptOrder(data.order, tz) };
   },
 
   async cancelOrder(orderId, reason, studentUSN) {
@@ -448,8 +609,14 @@ export const CanteenService = {
       p_session_token: token || null,
     });
     if (error) {
-      console.error("[CanteenService] cancel_order error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
+    }
+    if (data?.ok && data.order) {
+      const tz = _settings.timezone || "Asia/Kolkata";
+      const adapted = adaptOrder(data.order, tz);
+      _orders = _orders.map((o) => (o.id === adapted.id || o._uuid === adapted._uuid ? adapted : o));
+      _lastUpdated = new Date();
+      notify();
     }
     return data;
   },
@@ -463,12 +630,13 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] approve_order error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.order) {
-      const adapted = adaptOrder(data.order);
+      const tz = _settings.timezone || "Asia/Kolkata";
+      const adapted = adaptOrder(data.order, tz);
       _orders = _orders.map((o) => (o.id === adapted.id || o._uuid === adapted._uuid ? adapted : o));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -484,24 +652,30 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] reject_order error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.order) {
-      const adapted = adaptOrder(data.order);
+      const tz = _settings.timezone || "Asia/Kolkata";
+      const adapted = adaptOrder(data.order, tz);
       _orders = _orders.map((o) => (o.id === adapted.id || o._uuid === adapted._uuid ? adapted : o));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
   },
 
   async expirePendingOrders() {
-    const { data, error } = await supabase.rpc("expire_pending_orders");
-    if (error) {
-      console.error("[CanteenService] expire_pending_orders error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+    try {
+      const { data, error } = await supabase.rpc("expire_pending_orders");
+      if (error) {
+        console.error("[CanteenService] expire_pending_orders error:", error);
+        return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
+      }
+      return data;
+    } catch (err) {
+      console.error("[CanteenService] expirePendingOrders sweep exception:", err);
+      return { ok: false };
     }
-    return data;
   },
 
   async setItemAvailability(itemId, isAvailable) {
@@ -512,12 +686,12 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] set_item_availability error:", error);
-      return { ok: false, message: error.message };
+      return { ok: false, message: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.menu_item) {
       const adapted = adaptMenuItem(data.menu_item);
       _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -533,12 +707,12 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] set_item_stock error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.menu_item) {
       const adapted = adaptMenuItem(data.menu_item);
       _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -552,12 +726,12 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] set_item_stock error:", error);
-      return { ok: false, message: error.message };
+      return { ok: false, message: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.menu_item) {
       const adapted = adaptMenuItem(data.menu_item);
       _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -571,12 +745,12 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] restockItem error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.menu_item) {
       const adapted = adaptMenuItem(data.menu_item);
       _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -593,12 +767,12 @@ export const CanteenService = {
       p_badge: updatedItem.badge != null ? updatedItem.badge : null,
     });
     if (error) {
-      console.error("[CanteenService] updateMenuItem error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.menu_item) {
       const adapted = adaptMenuItem(data.menu_item);
       _menu = _menu.map((m) => (m.id === updatedItem.id ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -619,13 +793,13 @@ export const CanteenService = {
     });
 
     if (error) {
-      console.error("[CanteenService] add_menu_item error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
 
     const adapted = adaptMenuItem(data);
     if (adapted) {
       _menu = _dedupeMenu([adapted, ..._menu]);
+      _lastUpdated = new Date();
       notify();
     }
     return { ok: true, data: adapted };
@@ -636,12 +810,12 @@ export const CanteenService = {
       p_id: itemId,
     });
     if (error) {
-      console.error("[CanteenService] archive_menu_item error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
     const adapted = adaptMenuItem(data);
     if (adapted) {
       _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return { ok: true, data: adapted };
@@ -652,12 +826,12 @@ export const CanteenService = {
       p_id: itemId,
     });
     if (error) {
-      console.error("[CanteenService] unarchive_menu_item error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
     const adapted = adaptMenuItem(data);
     if (adapted) {
       _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      _lastUpdated = new Date();
       notify();
     }
     return { ok: true, data: adapted };
@@ -674,14 +848,15 @@ export const CanteenService = {
       p_auto_accept: newSettings.autoAccept ?? null,
       p_pending_expiry_minutes: newSettings.pendingExpiryMinutes ?? null,
       p_counter_approver: newSettings.counterApprover ?? null,
+      p_timezone: newSettings.timezone ?? null,
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] updateSettings error:", error);
-      return { ok: false, error: error.message };
+      return { ok: false, error: sanitizeErrorMessage(error) };
     }
     if (data?.ok && data.settings) {
       _settings = adaptSettings(data.settings);
+      _lastUpdated = new Date();
       notify();
     }
     return data;
@@ -695,10 +870,10 @@ export const CanteenService = {
       p_session_token: token,
     });
     if (error) {
-      console.error("[CanteenService] demo_reset error:", error);
-      return { ok: false, reason: "server_error", message: error.message };
+      return { ok: false, reason: "server_error", message: sanitizeErrorMessage(error) };
     }
     _activeOrderId = null;
+    _lastUpdated = new Date();
     return data;
   },
 
@@ -785,6 +960,8 @@ function _reasonToMessage(reason, unavailable = []) {
       return `Sorry — ${names || "one or more items"} just sold out. Please remove it from your cart and try again.`;
     case "temporarily_unavailable":
       return `Notice — ${names || "one or more items"} are temporarily paused by the kitchen right now.`;
+    case "invalid_name":
+      return "Student name is required (2 to 50 characters; letters, spaces, dots, and hyphens only).";
     case "invalid_usn":
       return "Please enter a valid college USN (Format: 1GAxxCSxxx).";
     case "daily_limit":

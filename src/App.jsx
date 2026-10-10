@@ -18,7 +18,7 @@ import {
 } from "./services/canteenState";
 import { RoleService, ROLES, can } from "./lib/role";
 import { sound } from "./utils/audio";
-import { RefreshCw, Zap, ShieldCheck, Loader2 } from "lucide-react";
+import { RefreshCw, Zap, ShieldCheck, Loader2, AlertCircle, X } from "lucide-react";
 import "./App.css";
 
 export default function App() {
@@ -42,6 +42,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [realtimeStatus, setRealtimeStatus] = useState("disconnected");
+  const [lastUpdated, setLastUpdated] = useState(() => CanteenService.getLastUpdatedFormatted());
 
   // ── Student USN Identity State ─────────────────────────────────────────
   const [studentUSN, setStudentUSN] = useState(() => getStoredStudentUSN() || "");
@@ -123,6 +124,7 @@ export default function App() {
       setOrders(CanteenService.getOrders());
       setSettings(CanteenService.getSettings());
       setRealtimeStatus(CanteenService.getRealtimeStatus());
+      setLastUpdated(CanteenService.getLastUpdatedFormatted());
       const active = CanteenService.getActiveOrder();
       if (active) setActiveOrderId(active.id);
     }
@@ -141,7 +143,8 @@ export default function App() {
     };
   }, []);
 
-  // Chime notification for Manager when new pending counter orders arrive
+  // Chime notification and Toast for Manager when new pending counter orders arrive
+  const [toast, setToast] = useState(null);
   const prevPendingCountRef = useRef(0);
   useEffect(() => {
     const pendingCount = orders.filter((o) => o.status === "pending_approval").length;
@@ -150,11 +153,25 @@ export default function App() {
         currentRole === ROLES.MANAGER ||
         (currentRole === ROLES.KITCHEN && settings.counterApprover === "kitchen_or_manager")
       ) {
-        sound.playReadyBell();
+        sound.playPendingAlert();
+        const diff = pendingCount - prevPendingCountRef.current;
+        setToast({
+          id: Date.now(),
+          title: "New Counter Order Arrival",
+          message: `${diff} pay-at-counter order${diff > 1 ? "s" : ""} awaiting counter payment approval.`,
+          count: pendingCount,
+        });
       }
     }
     prevPendingCountRef.current = pendingCount;
   }, [orders, currentRole, settings.counterApprover]);
+
+  // Auto-dismiss toast after 6 seconds
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   // ── Pickup slot refresh whenever cart changes ─────────────────────────
   useEffect(() => {
@@ -179,6 +196,10 @@ export default function App() {
     return orders.filter((o) => o.status !== "Collected" && o.status !== "Cancelled").length;
   }, [orders]);
   const kitchenLoad = Math.min(100, Math.round((activeOrdersCount / maxCapacity) * 100));
+
+  const pendingApprovalCount = useMemo(() => {
+    return orders.filter((o) => o.status === "pending_approval").length;
+  }, [orders]);
 
   // ── Cart operations (synchronous, no backend) ─────────────────────────
   const handleAddToCart = useCallback((item) => {
@@ -359,6 +380,8 @@ export default function App() {
           setCurrentRole(null);
         }}
         realtimeStatus={realtimeStatus}
+        lastUpdatedFormatted={lastUpdated}
+        pendingApprovalCount={pendingApprovalCount}
       />
 
       {/* Main Content Area */}
@@ -479,6 +502,9 @@ export default function App() {
                   onUnarchiveItem={handleUnarchiveItem}
                   onApproveOrder={handleApproveOrder}
                   onRejectOrder={handleRejectOrder}
+                  realtimeStatus={realtimeStatus}
+                  lastUpdatedFormatted={lastUpdated}
+                  onForceRefresh={() => CanteenService.refresh()}
                 />
               </motion.div>
             )}
@@ -585,6 +611,52 @@ export default function App() {
           )}
         </div>
       </footer>
+
+      {/* Floating Manager / Approver Toast Alert */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 30, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            transition={{ duration: 0.2 }}
+            className="fixed bottom-6 right-6 z-50 max-w-sm w-full mx-4 sm:mx-0 p-4 rounded-2xl bg-[#121522] border border-amber-500/40 shadow-2xl shadow-black/80 flex items-start gap-3.5 backdrop-blur-xl"
+            role="alert"
+          >
+            <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center shrink-0 border border-amber-500/30">
+              <AlertCircle className="w-5 h-5 text-amber-400 animate-pulse" />
+            </div>
+            <div 
+              className="flex-1 cursor-pointer"
+              onClick={() => {
+                sound.playClick();
+                if (can("tab:manager")) setActiveTab("manager");
+                else if (can("tab:kitchen")) setActiveTab("kitchen");
+                setToast(null);
+              }}
+            >
+              <h4 className="text-xs font-bold text-white tracking-wide uppercase flex items-center gap-1.5">
+                <span>{toast.title}</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-amber-500/30 text-amber-300 font-bold">
+                  {toast.count} Pending
+                </span>
+              </h4>
+              <p className="text-xs text-slate-300 mt-1 leading-relaxed">{toast.message}</p>
+              <p className="text-[10px] text-amber-400/80 font-mono mt-1 underline">Click to review in approvals inbox →</p>
+            </div>
+            <button
+              onClick={() => {
+                sound.playClick();
+                setToast(null);
+              }}
+              className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors"
+              aria-label="Close notification"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

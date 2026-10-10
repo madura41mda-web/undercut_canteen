@@ -20,6 +20,7 @@ import {
 import { QRCodeSVG } from "qrcode.react";
 import confetti from "canvas-confetti";
 import { sound } from "../utils/audio";
+import { sanitizeErrorMessage, isCancelledAutoHidden } from "../services/canteenState";
 
 const TIMELINE_STEPS = [
   { key: "Placed",    label: "Order Placed",      desc: "Sent to kitchen queue",         icon: Clock        },
@@ -65,8 +66,9 @@ export default function OrderTracking({
   const [cancelError, setCancelError] = useState("");
   const [showQRModal, setShowQRModal] = useState(false);
   const [timeRemainingStr, setTimeRemainingStr] = useState("10:00");
+  const [autoHideTicker, setAutoHideTicker] = useState(0);
 
-  // 1. Persistent dismissed order IDs per USN in localStorage
+  // 1. Persistent dismissed order IDs per USN in localStorage (with try/catch)
   const storageKey = `smartcanteen_dismissed_orders_${(studentUSN || "guest").toUpperCase()}`;
   
   const [dismissedIds, setDismissedIds] = useState(() => {
@@ -89,6 +91,14 @@ export default function OrderTracking({
     }
   }, [storageKey]);
 
+  // Periodic 30-second re-evaluation ticker for auto-hiding cancelled orders older than 5 minutes
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setAutoHideTicker((v) => v + 1);
+    }, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
   const handleDismissOrder = (orderId) => {
     sound.playClick();
     setDismissedIds((prev) => {
@@ -102,15 +112,21 @@ export default function OrderTracking({
     });
   };
 
-  // Student tracking shows ONLY that USN's orders (excluding dismissed)
+  // Student tracking shows ONLY that USN's orders (excluding dismissed & auto-hidden after 5 mins)
   const studentOrders = useMemo(() => {
     const raw = studentUSN
       ? orders.filter(
           (o) => (o.studentRoll || "").trim().toUpperCase() === studentUSN.trim().toUpperCase()
         )
       : orders;
-    return raw.filter((o) => !dismissedIds.includes(o.id) && !dismissedIds.includes(o._uuid));
-  }, [orders, studentUSN, dismissedIds]);
+    void autoHideTicker;
+    return raw.filter((o) => {
+      if (dismissedIds.includes(o.id) || dismissedIds.includes(o._uuid)) return false;
+      // Auto-hide Cancelled / Rejected / Expired orders 5 minutes after cancelledAt
+      if (isCancelledAutoHidden(o)) return false;
+      return true;
+    });
+  }, [orders, studentUSN, dismissedIds, autoHideTicker]);
 
   const currentOrder = studentOrders.find((o) => o.id === activeOrderId) || studentOrders[0];
 
@@ -156,18 +172,23 @@ export default function OrderTracking({
     if (!currentOrder) return;
     setIsCancelling(true);
     setCancelError("");
-    const res = await onCancelOrder(currentOrder.id, "Cancelled by student", studentUSN);
-    setIsCancelling(false);
-    if (res?.ok) {
-      setCancelConfirm(false);
-    } else {
-      setCancelError(
-        res?.reason === "forbidden_usn_mismatch"
-          ? "Unauthorized: You can only cancel your own orders."
-          : res?.reason === "illegal_transition"
-          ? "This order can no longer be cancelled."
-          : (res?.message || "Could not cancel. Please try again.")
-      );
+    try {
+      const res = await onCancelOrder(currentOrder.id, "Cancelled by student", studentUSN);
+      setIsCancelling(false);
+      if (res?.ok) {
+        setCancelConfirm(false);
+      } else {
+        setCancelError(
+          res?.reason === "forbidden_usn_mismatch"
+            ? "Unauthorized: You can only cancel your own orders."
+            : res?.reason === "illegal_transition"
+            ? "This order can no longer be cancelled."
+            : sanitizeErrorMessage(res?.message || res?.reason)
+        );
+      }
+    } catch (err) {
+      setIsCancelling(false);
+      setCancelError(sanitizeErrorMessage(err));
     }
   };
 
@@ -178,12 +199,12 @@ export default function OrderTracking({
         <h3 className="text-xl font-bold text-white">No active orders right now</h3>
         <p className="text-sm text-slate-400 mt-2 mb-6">
           {studentUSN
-            ? `No orders found for USN ${studentUSN}. Order your favourite food ahead to skip queues.`
+            ? `No active orders found for USN ${studentUSN}. Order your favourite food ahead to skip queues.`
             : "You haven't placed any canteen orders yet. Order your favourite food ahead to skip queues."}
         </p>
         <button
           onClick={onNewOrderClick}
-          className="px-6 py-3 rounded-xl bg-amber-500 text-black font-bold text-sm hover:bg-amber-400 shadow-lg shadow-amber-500/25"
+          className="px-6 py-3 rounded-xl bg-amber-500 text-black font-bold text-sm hover:bg-amber-400 shadow-lg shadow-amber-500/25 cursor-pointer"
         >
           Explore Food Menu
         </button>
@@ -275,7 +296,7 @@ export default function OrderTracking({
               Pay ₹{currentOrder.totalAmount} at {currentOrder.counter || "Counter"}
             </h2>
             <p className="text-sm text-amber-200/90 mt-2 max-w-lg mx-auto">
-              Please walk up to the designated counter and pay in cash to confirm your order. Your dish ingredients are reserved for you.
+              Please walk up to the counter and pay in cash to confirm your order. Your dish ingredients are reserved for you.
             </p>
 
             <div className="mt-4 flex items-center justify-center gap-3">
@@ -330,7 +351,7 @@ export default function OrderTracking({
             <div className="mt-4 flex justify-center">
               <button
                 onClick={() => handleDismissOrder(currentOrder.id)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold border border-white/20 transition-all active:scale-95"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold border border-white/20 transition-all active:scale-95 cursor-pointer"
               >
                 <X className="w-4 h-4" />
                 <span>Dismiss Cancelled Order</span>
@@ -365,7 +386,7 @@ export default function OrderTracking({
             <div className="mt-4 flex items-center justify-center gap-3">
               <button
                 onClick={() => sound.playReadyBell()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-xs font-medium border border-emerald-500/40"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 text-xs font-medium border border-emerald-500/40 cursor-pointer"
               >
                 <Volume2 className="w-3.5 h-3.5" />
                 Play Chime
@@ -378,257 +399,218 @@ export default function OrderTracking({
       {/* Main Order Card */}
       <div className="rounded-3xl bg-[#0e121d] border border-white/[0.08] shadow-2xl p-6 sm:p-8">
 
-        {/* Token, Time, and Counter Header */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-6 border-b border-white/[0.08] gap-4">
+        {/* Header with Token & Live Minutes Badge */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-white/[0.08]">
           <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-mono text-sm text-slate-400">Order ID:</span>
-              <span className="font-mono font-bold text-white text-base bg-white/[0.06] px-2.5 py-0.5 rounded-md border border-white/10">
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono text-slate-400">PICKUP TOKEN</span>
+              <span className="text-xs px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-slate-300 font-mono">
+                {currentOrder.counter}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 mt-1">
+              <span className="font-mono text-3xl sm:text-4xl font-extrabold text-amber-400 tracking-wider">
                 {currentOrder.id}
               </span>
-              <span className={`text-xs px-2 py-0.5 rounded-md font-mono font-semibold border ${
-                isCancelled
-                  ? "bg-red-500/20 text-red-300 border-red-500/40"
-                  : isPendingApproval
-                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                  : "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
-              }`}>
-                {isCancelled
-                  ? "Cancelled"
-                  : isPendingApproval
-                  ? "Pending Counter Approval"
-                  : `${currentOrder.priority} Priority`}
+              <button
+                onClick={copyToken}
+                className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+                title="Copy token"
+              >
+                {copiedToken ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              </button>
+              <button
+                onClick={() => setShowQRModal(true)}
+                className="p-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-colors flex items-center gap-1.5 text-xs font-mono"
+                title="Show Pickup QR Code"
+              >
+                <QrCode className="w-4 h-4" />
+                <span className="hidden sm:inline">Show QR</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {isPendingApproval ? (
+              <div className="text-right">
+                <span className="text-xs text-slate-400 block">Pending Counter Payment</span>
+                <span className="font-mono text-xl font-bold text-amber-400">
+                  {timeRemainingStr}
+                </span>
+              </div>
+            ) : !isCancelled && !isReady && currentOrder.status !== "Collected" ? (
+              <div className="text-right">
+                <span className="text-xs text-slate-400 block">Estimated Pickup In</span>
+                <span className="font-mono text-2xl font-bold text-emerald-400">
+                  ~{currentOrder.estimatedMinutesRemaining} mins
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Progress Timeline */}
+        <div className="py-8">
+          <div className="relative">
+            <div className="hidden sm:block absolute top-5 left-8 right-8 h-1 bg-white/10 rounded-full">
+              <div
+                className="h-full bg-gradient-to-r from-amber-500 to-emerald-500 rounded-full transition-all duration-700"
+                style={{
+                  width: isCancelled
+                    ? "0%"
+                    : `${(Math.max(0, currentStepIndex) / (TIMELINE_STEPS.length - 1)) * 100}%`,
+                }}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-6 sm:gap-2">
+              {TIMELINE_STEPS.map((step, idx) => {
+                const isStepPassed = !isCancelled && idx <= currentStepIndex;
+                const isStepCurrent = !isCancelled && idx === currentStepIndex;
+                const StepIcon = step.icon;
+
+                return (
+                  <div key={step.key} className="flex sm:flex-col items-center sm:items-center gap-4 sm:gap-2 text-left sm:text-center relative">
+                    <div
+                      className={`w-10 h-10 rounded-full flex items-center justify-center transition-all z-10 ${
+                        isStepCurrent
+                          ? "bg-amber-500 text-black ring-4 ring-amber-500/20 scale-110 shadow-lg shadow-amber-500/30"
+                          : isStepPassed
+                          ? "bg-emerald-500 text-black shadow-md shadow-emerald-500/20"
+                          : "bg-[#141724] border border-white/10 text-slate-500"
+                      }`}
+                    >
+                      <StepIcon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className={`text-xs font-bold leading-tight ${isStepCurrent ? "text-amber-400" : isStepPassed ? "text-white" : "text-slate-500"}`}>
+                        {step.label}
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 hidden sm:block">
+                        {step.desc}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Order Details & Summary */}
+        <div className="pt-6 border-t border-white/[0.08] space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="p-4 rounded-2xl bg-[#141724] border border-white/[0.06] space-y-2">
+              <div className="text-xs font-mono text-slate-400">STUDENT & PICKUP LOCATION</div>
+              <div className="text-sm font-bold text-white">{currentOrder.studentName} ({currentOrder.studentRoll})</div>
+              <div className="text-xs text-slate-300 flex items-center gap-1.5">
+                <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>{currentOrder.counter || "Main Counter"} • Promised {currentOrder.promisedPickupTime}</span>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-[#141724] border border-white/[0.06] space-y-2">
+              <div className="text-xs font-mono text-slate-400">PAYMENT & INSTRUCTIONS</div>
+              <div className="text-sm font-bold text-white flex items-center justify-between">
+                <span>{currentOrder.paymentMethod}</span>
+                <span className="font-mono text-amber-400 font-extrabold">₹{currentOrder.totalAmount}</span>
+              </div>
+              <div className="text-xs text-slate-400">
+                Note: {currentOrder.instructions || "None"}
+              </div>
+            </div>
+          </div>
+
+          {/* Items List */}
+          <div className="p-4 rounded-2xl bg-[#141724] border border-white/[0.06]">
+            <div className="text-xs font-mono text-slate-400 mb-2">ORDER ITEMS</div>
+            <div className="space-y-1.5">
+              {currentOrder.items?.map((item, i) => (
+                <div key={i} className="flex justify-between text-xs text-slate-200">
+                  <span>{item.quantity}x {item.name}</span>
+                  <span className="font-mono text-slate-400">₹{(item.price * item.quantity).toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Order Cancellation Zone */}
+        {canCancel && (
+          <div className="mt-6 pt-6 border-t border-white/[0.08] flex items-center justify-between flex-wrap gap-4">
+            <div>
+              <span className="text-xs text-slate-400 block">Need to cancel this order?</span>
+              <span className="text-[11px] text-slate-500">
+                {currentOrder.status === "Preparing"
+                  ? "Cooking in progress — food cannot be returned to stock."
+                  : "Stock will be safely returned to the kitchen immediately."}
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-1 font-mono">
-              Student: {currentOrder.studentName} ({currentOrder.studentRoll})
-            </p>
-          </div>
 
-          {/* Token Box with Quick Copy */}
-          <div className="flex items-center gap-3">
-            <div className={`p-3 sm:p-4 rounded-2xl border text-right ${
-              isCancelled
-                ? "bg-[#141826] border-red-500/30"
-                : isPendingApproval
-                ? "bg-[#141826] border-amber-500/30"
-                : "bg-[#141826] border-emerald-500/30"
-            }`}>
-              <div className="text-[10px] font-mono text-slate-400 uppercase tracking-widest font-semibold">
-                PICKUP TOKEN
+            {cancelConfirm ? (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCancelConfirm(false)}
+                  className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 text-xs font-semibold"
+                >
+                  Keep Order
+                </button>
+                <button
+                  onClick={handleCancel}
+                  disabled={isCancelling}
+                  className="px-4 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold shadow-lg shadow-red-600/20 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{isCancelling ? "Cancelling…" : "Confirm Cancel"}</span>
+                </button>
               </div>
-              <div className={`font-mono text-2xl sm:text-3xl font-extrabold tracking-wider ${
-                isCancelled ? "text-red-400 line-through" : isPendingApproval ? "text-amber-400" : "text-emerald-400"
-              }`}>
-                #{currentOrder.token || currentOrder.id.replace("CN-", "")}
-              </div>
-            </div>
-            <button
-              onClick={copyToken}
-              className="p-3 rounded-2xl bg-white/[0.06] hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 flex items-center justify-center transition-colors"
-              title="Copy token"
-            >
-              {copiedToken ? <Check className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
-            </button>
-          </div>
-        </div>
-
-        {/* Status Timeline */}
-        <div className="py-8">
-          <div className="relative flex items-center justify-between">
-            {/* Background Line */}
-            <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-1 bg-white/[0.06] z-0" />
-            
-            {/* Active Progress Line */}
-            <div
-              className="absolute left-0 top-1/2 -translate-y-1/2 h-1 bg-gradient-to-r from-amber-500 to-emerald-400 z-0 transition-all duration-500"
-              style={{
-                width: isPendingApproval ? "0%" : `${(Math.max(0, currentStepIndex) / (TIMELINE_STEPS.length - 1)) * 100}%`,
-              }}
-            />
-
-            {TIMELINE_STEPS.map((step, idx) => {
-              const Icon = step.icon;
-              const isPast = !isPendingApproval && idx < currentStepIndex;
-              const isCurrent = !isPendingApproval && idx === currentStepIndex;
-
-              return (
-                <div key={step.key} className="relative z-10 flex flex-col items-center group">
-                  <div
-                    className={`w-10 h-10 sm:w-12 sm:h-12 rounded-2xl border-2 flex items-center justify-center transition-all duration-300 ${
-                      isPast
-                        ? "bg-emerald-500 border-emerald-400 text-black shadow-lg shadow-emerald-500/20"
-                        : isCurrent
-                        ? "bg-amber-500 border-amber-300 text-black shadow-lg shadow-amber-500/30 scale-110"
-                        : "bg-[#141724] border-white/10 text-slate-500"
-                    }`}
-                  >
-                    <Icon className="w-5 h-5" />
-                  </div>
-                  <div className="mt-2.5 text-center hidden sm:block">
-                    <div className={`text-xs font-bold ${isCurrent ? "text-amber-400" : isPast ? "text-white" : "text-slate-500"}`}>
-                      {step.label}
-                    </div>
-                    <div className="text-[10px] text-slate-400 max-w-[80px] leading-tight mt-0.5">
-                      {step.desc}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Counter Info & Digital Pass */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-white/[0.08]">
-          <div className="p-4 rounded-2xl bg-[#111422] border border-white/[0.06] flex items-center gap-3.5">
-            <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
-              <MapPin className="w-6 h-6" />
-            </div>
-            <div>
-              <div className="text-[10px] font-mono text-slate-400 uppercase">COLLECTION COUNTER</div>
-              <div className="text-sm font-bold text-white mt-0.5">{currentOrder.counter || "Counter 1"}</div>
-              <div className="text-[11px] text-slate-400">
-                {isPendingApproval
-                  ? "Pay cash here to confirm order"
-                  : `Estimated Pickup: ${currentOrder.promisedPickupTime || "Ready soon"}`}
-              </div>
-            </div>
-          </div>
-
-          <button
-            onClick={() => setShowQRModal(true)}
-            className="p-4 rounded-2xl bg-[#111422] hover:bg-[#15192b] border border-white/[0.06] hover:border-amber-500/30 transition-all flex items-center justify-between text-left group"
-          >
-            <div>
-              <div className="text-xs font-mono text-slate-400 mb-1">DIGITAL COUNTER PASS</div>
-              <div className="text-xs font-semibold text-white group-hover:text-amber-400 transition-colors">Tap to display QR</div>
-              <div className="text-[10px] text-slate-400">Scan at counter or kiosk</div>
-            </div>
-            <div className="w-12 h-12 rounded-xl bg-white/5 group-hover:bg-amber-500/10 border border-white/10 group-hover:border-amber-500/30 flex items-center justify-center text-slate-300 transition-colors">
-              <QrCode className="w-7 h-7 text-amber-400" />
-            </div>
-          </button>
-        </div>
-
-        {/* Ordered Items Breakdown */}
-        <div className="mt-6 p-4 rounded-2xl bg-[#111422] border border-white/[0.06]">
-          <h4 className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold mb-3">
-            Items in this order ({currentOrder.items.length})
-          </h4>
-          <div className="space-y-2">
-            {currentOrder.items.map((it, idx) => (
-              <div key={idx} className="flex items-center justify-between text-xs sm:text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono font-bold text-amber-400">{it.quantity}x</span>
-                  <span className="text-slate-200 font-medium">{it.name}</span>
-                </div>
-                <span className="font-mono text-slate-400">₹{it.price * it.quantity}</span>
-              </div>
-            ))}
-          </div>
-
-          {currentOrder.instructions && currentOrder.instructions !== "None" && (
-            <div className="mt-3 pt-3 border-t border-white/[0.06] text-xs text-slate-400">
-              <span className="text-amber-400/90 font-medium">Notes for Kitchen:</span> "{currentOrder.instructions}"
-            </div>
-          )}
-        </div>
-
-        {/* Cancel Order Section */}
-        {canCancel && (
-          <div className="mt-6">
-            {!cancelConfirm ? (
-              <button
-                onClick={() => { sound.playClick(); setCancelConfirm(true); setCancelError(""); }}
-                className="w-full py-2.5 rounded-xl bg-red-950/30 hover:bg-red-950/50 text-red-400 hover:text-red-300 text-xs font-mono font-semibold flex items-center justify-center gap-2 border border-red-500/30 transition-all"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Cancel This Order
-              </button>
             ) : (
-              <div className="p-4 rounded-2xl bg-red-950/30 border border-red-500/40 space-y-3">
-                <div className="flex items-center gap-2 text-red-300 text-xs font-semibold">
-                  <AlertTriangle className="w-4 h-4" />
-                  {currentOrder.status === "Preparing"
-                    ? "This order is already being prepared. Cancelling will NOT restore stock. Proceed?"
-                    : currentOrder.status === "pending_approval"
-                    ? "Cancel this unpaid counter order and release reserved items?"
-                    : "Are you sure you want to cancel this order?"}
-                </div>
-                {cancelError && (
-                  <div className="text-[11px] text-red-400">{cancelError}</div>
-                )}
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleCancel}
-                    disabled={isCancelling}
-                    className="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition-all active:scale-95 disabled:opacity-60"
-                  >
-                    {isCancelling ? "Cancelling…" : "Yes, Cancel Order"}
-                  </button>
-                  <button
-                    onClick={() => { setCancelConfirm(false); setCancelError(""); }}
-                    className="flex-1 py-2 rounded-xl bg-white/[0.06] hover:bg-white/10 text-slate-300 font-semibold text-xs"
-                  >
-                    Keep Order
-                  </button>
-                </div>
-              </div>
+              <button
+                onClick={() => setCancelConfirm(true)}
+                className="px-3.5 py-1.5 rounded-xl bg-red-950/40 hover:bg-red-900/50 border border-red-500/30 text-red-300 text-xs font-semibold transition-all cursor-pointer"
+              >
+                Cancel Order
+              </button>
             )}
           </div>
         )}
 
-      </div>
-
-      {/* QR Code Modal */}
-      <AnimatePresence>
-        {showQRModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="relative w-full max-w-sm rounded-3xl bg-[#0f121d] border border-amber-500/30 p-6 text-center shadow-2xl overflow-hidden"
-            >
-              <div className="absolute top-4 right-4">
-                <button
-                  onClick={() => setShowQRModal(false)}
-                  className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[11px] font-mono text-amber-400 font-bold uppercase tracking-wider mb-3">
-                <QrCode className="w-3.5 h-3.5" />
-                COUNTER PICKUP PASS
-              </div>
-
-              <h3 className="text-xl font-bold text-white mb-1">
-                Order #{currentOrder.token || currentOrder.id}
-              </h3>
-              <p className="text-xs text-slate-400 mb-6 font-mono">
-                {currentOrder.studentRoll} • {currentOrder.counter}
-              </p>
-
-              <div className="p-4 bg-white rounded-2xl mx-auto w-fit shadow-xl border-4 border-amber-400">
-                <QRCodeSVG
-                  value={qrPayload}
-                  size={190}
-                  level="H"
-                  includeMargin={false}
-                />
-              </div>
-
-              <p className="text-[11px] text-slate-400 mt-4 leading-relaxed">
-                Present this QR code to the cashier or dispenser scanner at {currentOrder.counter}
-              </p>
-            </motion.div>
+        {cancelError && (
+          <div className="mt-3 p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+            <span>{cancelError}</span>
           </div>
         )}
-      </AnimatePresence>
+      </div>
 
+      {/* QR Code Modal for Counter Scanner */}
+      {showQRModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <motion.div
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="relative w-full max-w-sm rounded-3xl bg-[#0e121d] border border-amber-500/40 p-6 text-center shadow-2xl"
+          >
+            <button
+              onClick={() => setShowQRModal(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 mx-auto mb-3">
+              <QrCode className="w-5 h-5" />
+            </div>
+            <h3 className="text-lg font-bold text-white">Pickup Verification QR</h3>
+            <p className="text-xs text-slate-400 mt-1">Show this QR code to the staff at {currentOrder.counter}</p>
+            <div className="mt-5 p-4 bg-white rounded-2xl inline-block shadow-inner">
+              <QRCodeSVG value={qrPayload} size={180} level="M" />
+            </div>
+            <div className="mt-4 font-mono text-xl font-bold text-amber-400">
+              Token: {currentOrder.id}
+            </div>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

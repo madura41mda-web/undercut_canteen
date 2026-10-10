@@ -11,6 +11,7 @@ import {
 import { sound } from "../utils/audio";
 import { 
   USN_REGEX, 
+  NAME_REGEX,
   getStoredStudentUSN, 
   setStoredStudentUSN, 
   getStoredStudentName, 
@@ -23,11 +24,12 @@ export default function StudentUSNModal({
   onSave,
   canDismiss = true,
   title = "Student USN Identification",
-  subtitle = "Enter your college USN to order, track and collect food"
+  subtitle = "Enter your college USN and Name to order, track and collect food"
 }) {
   const [yearDigits, setYearDigits] = useState("");
   const [rollDigits, setRollDigits] = useState("");
   const [studentName, setStudentName] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [error, setError] = useState("");
 
   const yearInputRef = useRef(null);
@@ -39,6 +41,7 @@ export default function StudentUSNModal({
       const stored = getStoredStudentUSN();
       const storedName = getStoredStudentName();
       setStudentName(storedName || "");
+      setNameTouched(false);
       setError("");
 
       if (stored && USN_REGEX.test(stored)) {
@@ -75,35 +78,47 @@ export default function StudentUSNModal({
   };
 
   const handleRollKeyDown = (e) => {
-    // If backspace is pressed on empty roll input, focus back to year input
     if (e.key === "Backspace" && rollDigits.length === 0) {
       yearInputRef.current?.focus();
     }
   };
 
   const fullUSN = `1GA${yearDigits}CS${rollDigits}`;
-  const isValid = USN_REGEX.test(fullUSN);
+  const isUSNValid = USN_REGEX.test(fullUSN);
+  const cleanName = studentName.trim();
+  const isNameValid = NAME_REGEX.test(cleanName);
+
+  const getNameErrorMessage = () => {
+    if (!cleanName) return "Student name is required.";
+    if (cleanName.length < 2) return "Name must be at least 2 characters.";
+    if (cleanName.length > 50) return "Name cannot exceed 50 characters.";
+    if (!NAME_REGEX.test(cleanName)) return "Only letters, spaces, dots, hyphens and apostrophes allowed.";
+    return "";
+  };
+
+  const nameError = (nameTouched || studentName.length > 0) ? getNameErrorMessage() : "";
 
   const handleSubmit = (e) => {
     e?.preventDefault();
+    setNameTouched(true);
     setError("");
 
-    if (yearDigits.length !== 2 || rollDigits.length !== 3) {
-      setError("Please enter the complete 5 digits (2-digit year & 3-digit roll number).");
+    if (yearDigits.length !== 2 || rollDigits.length !== 3 || !isUSNValid) {
+      setError("Please enter a valid 5-digit USN (e.g. 1GA24CS012).");
       return;
     }
 
-    if (!isValid) {
-      setError("Invalid USN format. Must follow 1GAxxCSxxx (e.g. 1GA24CS012).");
+    if (!isNameValid) {
+      setError(getNameErrorMessage() || "Please enter a valid student name.");
       return;
     }
 
     sound.playSuccess();
     setStoredStudentUSN(fullUSN);
-    setStoredStudentName(studentName);
+    setStoredStudentName(cleanName);
 
     if (onSave) {
-      onSave(fullUSN, studentName.trim());
+      onSave(fullUSN, cleanName);
     }
     if (onClose) {
       onClose();
@@ -195,28 +210,49 @@ export default function StudentUSNModal({
               {/* USN Live Preview & Format Helper */}
               <div className="mt-2 flex items-center justify-between text-[11px] font-mono text-slate-400">
                 <span>Format: 1GA[YY]CS[XXX]</span>
-                <span className={isValid ? "text-emerald-400 font-bold flex items-center gap-1" : "text-slate-500"}>
-                  {isValid && <Check className="w-3.5 h-3.5" />}
+                <span className={isUSNValid ? "text-emerald-400 font-bold flex items-center gap-1" : "text-slate-500"}>
+                  {isUSNValid && <Check className="w-3.5 h-3.5" />}
                   Preview: {fullUSN.length === 10 ? fullUSN : `${fullUSN}…`}
                 </span>
               </div>
             </div>
 
-            {/* Optional Student Name */}
+            {/* Mandatory Student Name */}
             <div>
-              <label htmlFor="student-name-input" className="block text-xs font-mono font-bold uppercase tracking-wider text-slate-300 mb-1.5 flex items-center gap-1.5">
-                <User className="w-3.5 h-3.5 text-slate-400" />
-                <span>Your Name <span className="text-slate-500 lowercase">(optional)</span></span>
+              <label htmlFor="student-name-input" className="block text-xs font-mono font-bold uppercase tracking-wider text-slate-300 mb-1.5 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Student Name <span className="text-amber-400">*</span></span>
+                </span>
+                <span className="text-[10px] text-slate-400 lowercase font-sans">
+                  (2–50 letters)
+                </span>
               </label>
               <input
                 id="student-name-input"
                 type="text"
-                placeholder="Enter your name (e.g. Samarth)"
+                required
+                placeholder="Enter your full name (e.g. Samarth Sharma)"
                 value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                maxLength={40}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#141828] border border-white/10 text-white text-xs sm:text-sm focus:outline-none focus:border-amber-400 placeholder:text-slate-500"
+                onChange={(e) => {
+                  setStudentName(e.target.value);
+                  setError("");
+                }}
+                onBlur={() => setNameTouched(true)}
+                maxLength={50}
+                className={`w-full px-3.5 py-2.5 rounded-xl bg-[#141828] border text-xs sm:text-sm text-white focus:outline-none transition-colors placeholder:text-slate-500 ${
+                  nameError 
+                    ? "border-red-500/60 focus:border-red-400" 
+                    : isNameValid 
+                      ? "border-emerald-500/40 focus:border-emerald-400" 
+                      : "border-white/10 focus:border-amber-400"
+                }`}
               />
+              {nameError && (
+                <p className="mt-1 text-[11px] text-red-400 font-medium">
+                  {nameError}
+                </p>
+              )}
             </div>
 
             {/* Error Message Alert */}
@@ -235,7 +271,7 @@ export default function StudentUSNModal({
             <div className="pt-2">
               <button
                 type="submit"
-                disabled={!isValid}
+                disabled={!isUSNValid || !isNameValid}
                 className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-black font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 active:scale-95 transition-all cursor-pointer disabled:cursor-not-allowed"
               >
                 <span>Save & Continue</span>

@@ -8,9 +8,11 @@ import {
   Sparkles,
   Zap,
   Users,
+  Wifi,
   WifiOff,
   LogOut,
-  GraduationCap
+  GraduationCap,
+  AlertCircle
 } from "lucide-react";
 import { sound } from "../utils/audio";
 import { ROLES, can } from "../lib/role";
@@ -28,7 +30,9 @@ export default function Navbar({
   onLogout,
   studentUSN = "",
   onChangeUSN,
-  realtimeStatus = "connected"
+  realtimeStatus = "connected",
+  lastUpdatedFormatted = "",
+  pendingApprovalCount = 0
 }) {
   // Determine allowed navigation items strictly according to currentRole
   const allNavItems = [
@@ -58,7 +62,9 @@ export default function Navbar({
       id: "manager", 
       label: "Operations & Manager", 
       icon: LayoutDashboard, 
-      permission: "tab:manager" 
+      permission: "tab:manager",
+      badge: pendingApprovalCount > 0 ? `${pendingApprovalCount} pending` : null,
+      badgeColor: "bg-red-500/20 text-red-300 border-red-500/40"
     },
   ];
 
@@ -152,26 +158,67 @@ export default function Navbar({
             </nav>
           )}
 
-          {/* Right Action Bar: Status Chips, Switch Role, & Cart */}
+          {/* Right Action Bar: Connection Status Chip, Role & Cart */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Realtime Reconnecting Indicator */}
-            {realtimeStatus === "reconnecting" && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-mono animate-pulse">
-                <WifiOff className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden sm:inline">Reconnecting…</span>
-              </div>
+            
+            {/* Unified Connection Chip with Last Updated Time */}
+            <div className="flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-full bg-[#121520] border border-white/[0.08] text-xs font-mono select-none">
+              {realtimeStatus === "connected" ? (
+                <>
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  </span>
+                  <span className="text-emerald-300 font-semibold hidden sm:inline">Live</span>
+                </>
+              ) : realtimeStatus === "reconnecting" ? (
+                <>
+                  <WifiOff className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                  <span className="text-amber-300 font-semibold hidden sm:inline">
+                    Reconnecting <span className="text-[10px] text-amber-400/80">(every 5s)</span>
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="h-2 w-2 rounded-full bg-red-500"></span>
+                  <span className="text-red-400 font-semibold hidden sm:inline">Offline</span>
+                </>
+              )}
+
+              {lastUpdatedFormatted && (
+                <span className="text-[11px] text-slate-400 border-l border-white/10 pl-2">
+                  {lastUpdatedFormatted}
+                </span>
+              )}
+            </div>
+
+            {/* Manager Pending Approval Header Alert Badge */}
+            {currentRole === ROLES.MANAGER && pendingApprovalCount > 0 && (
+              <motion.button
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.96 }}
+                onClick={() => {
+                  sound.playClick();
+                  setActiveTab("manager");
+                }}
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-red-950/40 border border-red-500/40 text-red-300 text-xs font-mono font-bold animate-pulse cursor-pointer shadow-lg shadow-red-500/10"
+                title={`${pendingApprovalCount} order(s) awaiting payment approval at counter`}
+              >
+                <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                <span>{pendingApprovalCount} Awaiting Approval</span>
+              </motion.button>
             )}
 
-            {/* Live Kitchen Load Indicator (Computed REAL value) */}
-            <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#121520] border border-white/[0.08]">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-              </span>
-              <span className="text-xs text-slate-300 font-medium">
-                Kitchen: <span className="font-mono text-emerald-400">{kitchenLoad}% Load</span>
-              </span>
-            </div>
+            {/* Live Kitchen Load Indicator */}
+            {currentRole !== ROLES.STUDENT && (
+              <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#121520] border border-white/[0.08]">
+                <span className="text-xs text-slate-300 font-medium">
+                  Load: <span className="font-mono text-emerald-400">{kitchenLoad}%</span>
+                </span>
+              </div>
+            )}
 
             {/* Student USN Badge with Change USN button */}
             {currentRole === ROLES.STUDENT && (

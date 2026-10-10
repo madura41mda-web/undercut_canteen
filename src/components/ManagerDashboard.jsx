@@ -7,7 +7,7 @@ import {
   Sliders, 
   ShieldCheck, 
   Edit3, 
-  X,
+  X, 
   CheckCircle, 
   Calendar, 
   Archive, 
@@ -18,7 +18,13 @@ import {
   ChevronUp,
   XCircle,
   Timer,
-  Check
+  Check,
+  Wifi,
+  WifiOff,
+  Activity,
+  RefreshCw,
+  History,
+  Search
 } from "lucide-react";
 import { sound } from "../utils/audio";
 
@@ -31,7 +37,10 @@ export default function ManagerDashboard({
   onArchiveItem,
   onUnarchiveItem,
   onApproveOrder,
-  onRejectOrder
+  onRejectOrder,
+  realtimeStatus = "connected",
+  lastUpdatedFormatted = "",
+  onForceRefresh
 }) {
   const [editingItem, setEditingItem] = useState(null);
   const [capacity, setCapacity] = useState(settings.maxKitchenCapacity || 12);
@@ -39,6 +48,12 @@ export default function ManagerDashboard({
   const [pendingExpiryMinutes, setPendingExpiryMinutes] = useState(settings.pendingExpiryMinutes || 10);
   const [counterApprover, setCounterApprover] = useState(settings.counterApprover || "manager");
   
+  const [isDiagnosticsExpanded, setIsDiagnosticsExpanded] = useState(false);
+  const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState("all");
+  const [historySearch, setHistorySearch] = useState("");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
   const [isMenuExpanded, setIsMenuExpanded] = useState(false);
   const [savedSettingsNotice, setSavedSettingsNotice] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -54,6 +69,21 @@ export default function ManagerDashboard({
     return new Date().toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
   }, []);
 
+  const formatTimestamp = (ts) => {
+    if (!ts) return "—";
+    try {
+      const d = new Date(ts);
+      return d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        timeZone: settings.timezone || "Asia/Kolkata",
+      });
+    } catch {
+      return new Date(ts).toLocaleTimeString();
+    }
+  };
+
   // 1. Approvals Inbox: Orders in 'pending_approval' status
   const pendingOrders = useMemo(() => {
     return orders.filter((o) => o.status === "pending_approval");
@@ -61,8 +91,34 @@ export default function ManagerDashboard({
 
   // 2. Real Today's Computed Numbers
   const todayOrders = useMemo(() => {
-    return orders.filter((o) => o.status !== "Cancelled");
+    return orders.filter((o) => !["Cancelled", "Rejected", "Expired"].includes(o.status));
   }, [orders]);
+
+  // 3. Filtered orders for Order History (Today)
+  const filteredHistoryOrders = useMemo(() => {
+    return orders.filter((o) => {
+      if (historyFilter === "active" && !["Placed", "Accepted", "Preparing", "Ready", "pending_approval"].includes(o.status)) {
+        return false;
+      }
+      if (historyFilter === "collected" && o.status !== "Collected") {
+        return false;
+      }
+      if (historyFilter === "cancelled" && !["Cancelled", "Rejected", "Expired"].includes(o.status)) {
+        return false;
+      }
+
+      if (historySearch.trim()) {
+        const q = historySearch.toLowerCase();
+        const matchesName = o.studentName?.toLowerCase().includes(q);
+        const matchesUSN = o.studentUSN?.toLowerCase().includes(q);
+        const matchesCode = o.pickupCode?.toLowerCase().includes(q);
+        const matchesId = o.id?.toLowerCase().includes(q);
+        return matchesName || matchesUSN || matchesCode || matchesId;
+      }
+
+      return true;
+    });
+  }, [orders, historyFilter, historySearch]);
 
   const totalRevenue = useMemo(() => {
     return todayOrders.reduce((sum, o) => {
@@ -199,6 +255,133 @@ export default function ManagerDashboard({
           </div>
         </div>
       </div>
+
+      {/* ────────────────────────────────────────────────────────────────────
+          0. LIVE CONNECTIVITY & SYNC DIAGNOSTICS (Manager Only, Collapsed)
+      ──────────────────────────────────────────────────────────────────── */}
+      <section className="rounded-2xl bg-[#0b0e17] border border-white/[0.08] overflow-hidden">
+        <div 
+          onClick={() => {
+            sound.playClick();
+            setIsDiagnosticsExpanded(!isDiagnosticsExpanded);
+          }}
+          className="flex flex-col sm:flex-row sm:items-center justify-between p-4 cursor-pointer hover:bg-white/[0.02] transition-colors gap-3"
+        >
+          <div className="flex items-center gap-3">
+            <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${
+              realtimeStatus === "connected"
+                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                : realtimeStatus === "reconnecting"
+                ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                : "bg-red-500/20 text-red-300 border border-red-500/30"
+            }`}>
+              <Activity className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-white tracking-wide uppercase">
+                  Realtime Connectivity & Diagnostics
+                </span>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase tracking-wider ${
+                  realtimeStatus === "connected"
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                    : realtimeStatus === "reconnecting"
+                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                    : "bg-red-500/20 text-red-300 border border-red-500/40"
+                }`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    realtimeStatus === "connected" ? "bg-emerald-400 animate-pulse" : realtimeStatus === "reconnecting" ? "bg-amber-400" : "bg-red-400"
+                  }`} />
+                  {realtimeStatus === "connected" ? "Live WebSocket" : realtimeStatus === "reconnecting" ? "Fallback Polling (5s)" : "Offline"}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Channel: <span className="font-mono text-slate-300">canteen-live-sync</span> • Last refresh: <span className="font-mono text-amber-400">{lastUpdatedFormatted || "Syncing…"}</span> • Pending counter: <span className="font-mono text-white font-bold">{pendingOrders.length}</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 self-end sm:self-auto">
+            <span className="text-xs text-slate-400 font-mono">
+              {isDiagnosticsExpanded ? "Hide Details" : "Inspect Diagnostics"}
+            </span>
+            <div className="p-1 rounded-lg bg-white/[0.05] text-slate-300">
+              {isDiagnosticsExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </div>
+          </div>
+        </div>
+
+        <AnimatePresence>
+          {isDiagnosticsExpanded && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="p-5 border-t border-white/[0.06] bg-black/20 space-y-4"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="p-3 rounded-xl bg-[#121522] border border-white/[0.06]">
+                  <span className="text-[10px] font-mono text-slate-400 uppercase block">Transport Status</span>
+                  <div className="text-xs font-bold text-white mt-1 flex items-center gap-1.5">
+                    {realtimeStatus === "connected" ? (
+                      <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <WifiOff className="w-3.5 h-3.5 text-amber-400" />
+                    )}
+                    <span>{realtimeStatus === "connected" ? "Subscribed (WebSocket)" : "Polling Fallback (5s)"}</span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">Automatic backoff & retry on reconnect</p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#121522] border border-white/[0.06]">
+                  <span className="text-[10px] font-mono text-slate-400 uppercase block">Last Refresh Time</span>
+                  <div className="text-xs font-bold text-amber-300 font-mono mt-1">
+                    {lastUpdatedFormatted || "Syncing…"}
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">Timezone: {settings.timezone || "Asia/Kolkata"}</p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#121522] border border-white/[0.06]">
+                  <span className="text-[10px] font-mono text-slate-400 uppercase block">Pending Counter Approvals</span>
+                  <div className="text-xs font-bold text-white font-mono mt-1">
+                    {pendingOrders.length} order{pendingOrders.length === 1 ? "" : "s"}
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">Auto-expires after {settings.pendingExpiryMinutes || 10}m</p>
+                </div>
+
+                <div className="p-3 rounded-xl bg-[#121522] border border-white/[0.06]">
+                  <span className="text-[10px] font-mono text-slate-400 uppercase block">Campus Wi-Fi Resiliency</span>
+                  <div className="text-xs font-bold text-emerald-400 mt-1">
+                    Listeners Active
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-1">5s ticker + tab visibility + window focus</p>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-between pt-2 border-t border-white/[0.04] gap-2">
+                <span className="text-[11px] text-slate-400 font-mono">
+                  Realtime publication: orders, order_items, menu_items, kitchen_settings
+                </span>
+                {onForceRefresh && (
+                  <button
+                    onClick={async () => {
+                      sound.playClick();
+                      setIsRefreshing(true);
+                      await onForceRefresh();
+                      setTimeout(() => setIsRefreshing(false), 500);
+                    }}
+                    disabled={isRefreshing}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/10 text-slate-200 text-xs font-mono font-semibold border border-white/10 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin text-amber-400" : ""}`} />
+                    <span>{isRefreshing ? "Refetching Data…" : "Trigger Instant Sync"}</span>
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </section>
 
       {/* ────────────────────────────────────────────────────────────────────
           1. TOP: APPROVALS INBOX (Pay-at-Counter Orders)
@@ -505,7 +688,218 @@ export default function ManagerDashboard({
       </section>
 
       {/* ────────────────────────────────────────────────────────────────────
-          4. THEN: MENU ITEMS AND PRICES (Collapsed by Default)
+          4. ORDER HISTORY (TODAY) (Manager Audit Trail, Collapsed by Default)
+      ──────────────────────────────────────────────────────────────────── */}
+      <section className="p-6 rounded-3xl bg-[#0e111a] border border-white/[0.08]">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-400">
+              <History className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <span>Order History (Today)</span>
+                <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-white/[0.06] text-purple-300 border border-purple-500/30">
+                  {orders.length} TOTAL
+                </span>
+              </h2>
+              <p className="text-xs text-slate-400">
+                Audited ledger of today's orders including cancelled and expired items (never purged)
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              sound.playClick();
+              setIsHistoryExpanded(!isHistoryExpanded);
+            }}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#141826] hover:bg-[#1a2034] text-slate-200 text-xs font-semibold border border-white/10 transition-colors shrink-0"
+          >
+            <span>{isHistoryExpanded ? "Collapse History" : `Expand History (${orders.length} orders)`}</span>
+            {isHistoryExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+        </div>
+
+        {/* Expandable Order History Table */}
+        <AnimatePresence>
+          {isHistoryExpanded && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-6 pt-4 border-t border-white/[0.06] overflow-hidden space-y-4"
+            >
+              {/* Audit notice banner */}
+              <div className="p-3 rounded-2xl bg-purple-950/20 border border-purple-500/20 flex items-start gap-2.5">
+                <ShieldCheck className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
+                <p className="text-xs text-purple-200/90 leading-relaxed">
+                  <span className="font-bold">Permanent Audit Trail:</span> Cancelled, rejected, and expired orders are automatically hidden from student live tracking and the kitchen cooking queue 5 minutes after cancellation, but are retained here indefinitely for manager audits and financial reconciliations.
+                </p>
+              </div>
+
+              {/* Filters and search */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
+                  {[
+                    { id: "all", label: `All (${orders.length})` },
+                    { id: "active", label: `Active (${activeOrders.length})` },
+                    { id: "collected", label: `Collected (${orders.filter((o) => o.status === "Collected").length})` },
+                    { id: "cancelled", label: `Cancelled/Rejected (${orders.filter((o) => ["Cancelled", "Rejected", "Expired"].includes(o.status)).length})` },
+                  ].map((filter) => (
+                    <button
+                      key={filter.id}
+                      onClick={() => {
+                        sound.playClick();
+                        setHistoryFilter(filter.id);
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-colors ${
+                        historyFilter === filter.id
+                          ? "bg-purple-500/20 text-purple-300 border border-purple-500/40"
+                          : "bg-white/[0.04] text-slate-400 hover:text-slate-200 border border-white/[0.06]"
+                      }`}
+                    >
+                      {filter.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    placeholder="Search by name, USN, token…"
+                    className="w-full sm:w-64 pl-8 pr-3 py-1.5 rounded-xl bg-[#141826] border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500/50"
+                  />
+                  {historySearch && (
+                    <button
+                      onClick={() => setHistorySearch("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Orders Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-white/[0.08] text-slate-400 font-mono uppercase tracking-wider">
+                      <th className="py-3 px-3">Order / Token</th>
+                      <th className="py-3 px-3">Student</th>
+                      <th className="py-3 px-3">Items</th>
+                      <th className="py-3 px-3">Payment</th>
+                      <th className="py-3 px-3">Placed At</th>
+                      <th className="py-3 px-3">Status</th>
+                      <th className="py-3 px-3 text-right">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/[0.04]">
+                    {filteredHistoryOrders.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" className="py-8 text-center text-slate-500 font-mono">
+                          No orders matched the current filter or search criteria.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredHistoryOrders.map((order) => {
+                        const isCancelled = ["Cancelled", "Rejected", "Expired"].includes(order.status);
+                        const statusColors = {
+                          pending_approval: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
+                          Placed: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+                          Accepted: "bg-blue-500/20 text-blue-300 border-blue-500/30",
+                          Preparing: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
+                          Ready: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30 animate-pulse",
+                          Collected: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+                          Cancelled: "bg-red-500/20 text-red-300 border-red-500/30",
+                          Rejected: "bg-rose-500/20 text-rose-300 border-rose-500/30",
+                          Expired: "bg-zinc-500/20 text-zinc-400 border-zinc-500/30",
+                        };
+
+                        return (
+                          <tr
+                            key={order.id}
+                            className={`hover:bg-white/[0.02] transition-colors ${
+                              isCancelled ? "bg-red-950/10" : ""
+                            }`}
+                          >
+                            <td className="py-3 px-3 font-mono">
+                              <span className="font-bold text-white">
+                                #{order.pickupCode || (order.id ? order.id.slice(0, 8) : "—")}
+                              </span>
+                              {order.pickupSlot && (
+                                <div className="text-[10px] text-slate-400 font-normal">
+                                  Slot: {order.pickupSlot}
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-3">
+                              <div className="font-semibold text-white">
+                                {order.studentName || "Anonymous Student"}
+                              </div>
+                              <div className="text-[10px] font-mono text-slate-400">
+                                {order.studentUSN || "—"}
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-3 text-slate-300 max-w-xs truncate">
+                              {order.items?.length
+                                ? order.items.map((i) => `${i.quantity}× ${i.name}`).join(", ")
+                                : "—"}
+                            </td>
+
+                            <td className="py-3 px-3">
+                              <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-mono uppercase bg-white/[0.05] text-slate-300 border border-white/10">
+                                {order.paymentType === "counter_cash" ? "Counter Cash" : "UPI"}
+                              </span>
+                            </td>
+
+                            <td className="py-3 px-3 font-mono text-slate-300 text-[11px]">
+                              {formatTimestamp(order.placed_at || order.placedAt)}
+                            </td>
+
+                            <td className="py-3 px-3">
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold font-mono uppercase border ${
+                                  statusColors[order.status] || "bg-white/10 text-white border-white/20"
+                                }`}
+                              >
+                                {order.status}
+                              </span>
+                              {isCancelled && order.cancelled_at && (
+                                <div className="text-[10px] text-red-400/80 font-mono mt-0.5">
+                                  Cancelled at {formatTimestamp(order.cancelled_at)}
+                                </div>
+                              )}
+                              {order.rejection_reason && (
+                                <div className="text-[10px] text-rose-400 italic mt-0.5 max-w-xs truncate">
+                                  Reason: {order.rejection_reason}
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-3 text-right font-mono font-bold text-white">
+                              ₹{order.totalAmount || 0}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </section>
+
+      {/* ────────────────────────────────────────────────────────────────────
+          5. THEN: MENU ITEMS AND PRICES (Collapsed by Default)
       ──────────────────────────────────────────────────────────────────── */}
       <section className="p-6 rounded-3xl bg-[#0e111a] border border-white/[0.08]">
         <div className="flex items-center justify-between pb-2">
