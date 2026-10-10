@@ -1,0 +1,14 @@
+/* Smart Canteen Animations & Transitions */
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(245, 158, 11, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 35px rgba(245, 158, 11, 0.45);
+  }
+}
+
+.pulse-glow-amber {
+  animation: pulseGlow 2.5s infinite ease-in-out;
+}

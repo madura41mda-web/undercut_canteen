@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'Geist Mono', monospace;
+    
+    /* shadcn/ui inspired color tokens */
+    --background: 224 71% 4%;
+    --foreground: 213 31% 91%;
+    --card: 224 71% 6%;
+    --card-foreground: 213 31% 91%;
+    --popover: 224 71% 4%;
+    --popover-foreground: 215 20.2% 65.1%;
+    --primary: 38 92% 50%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 222 47% 11%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 223 47% 11%;
+    --muted-foreground: 215.4 16.3% 56.9%;
+    --accent: 216 34% 17%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 63% 31%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 216 34% 17%;
+    --input: 216 34% 17%;
+    --ring: 38 92% 50%;
+    --radius: 0.75rem;
+  }
+  
+  body {
+    font-family: var(--font-sans);
+    background-color: #08090d;
+    color: #f1f3f9;
+    letter-spacing: -0.015em;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* Custom shadcn/ui + motion scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: #08090d;
+}
+::-webkit-scrollbar-thumb {
+  background: #1c202d;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2a3045;
+}
+
+/* shadcn/ui Card & Glassmorphism styles */
+.shadcn-card {
+  background: rgba(13, 16, 25, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.shadcn-card-solid {
+  background: #0d101a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.motion-card {
+  background: #0d101a;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.motion-card:hover {
+  border-color: rgba(245, 158, 11, 0.35);
+  transform: translateY(-2px);
+  box-shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.6), 0 0 24px -10px rgba(245, 158, 11, 0.15);
+}
+
+.font-mono-code {
+  font-family: var(--font-mono);
+}
+
+/* Moving Background Food Elements Animations */
+@keyframes float-slow {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-20px) rotate(4deg);
+  }
+}
+
+@keyframes float-reverse {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(22px) rotate(-4deg);
+  }
+}
+
+@keyframes float-horizontal {
+  0%, 100% {
+    transform: translateX(0px) translateY(0px);
+  }
+  50% {
+    transform: translateX(18px) translateY(-14px);
+  }
+}
+
+@keyframes marquee-drift {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes marquee-drift-reverse {
+  0% {
+    transform: translateX(-50%);
+  }
+  100% {
+    transform: translateX(0%);
+  }
+}
+
+.animate-float-slow {
+  animation: float-slow 7s ease-in-out infinite;
+}
+
+.animate-float-reverse {
+  animation: float-reverse 9s ease-in-out infinite;
+}
+
+.animate-float-horizontal {
+  animation: float-horizontal 8s ease-in-out infinite;
+}
+
+.animate-marquee-drift {
+  animation: marquee-drift 40s linear infinite;
+}
+
+.animate-marquee-drift-reverse {
+  animation: marquee-drift-reverse 45s linear infinite;
+}
+
+/* Subtle dot-grid pattern inspired by shadcn/ui */
+.bg-grid-pattern {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
