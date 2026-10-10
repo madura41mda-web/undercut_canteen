@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   CheckCircle2,
@@ -9,14 +9,15 @@ import {
   QrCode,
   Copy,
   Check,
-  Sparkles,
   Volume2,
-  RefreshCw,
-  Bell,
   XCircle,
   AlertTriangle,
-  Trash2
+  Trash2,
+  X,
+  Timer,
+  Hourglass
 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import confetti from "canvas-confetti";
 import { sound } from "../utils/audio";
 
@@ -24,37 +25,116 @@ const TIMELINE_STEPS = [
   { key: "Placed",    label: "Order Placed",      desc: "Sent to kitchen queue",         icon: Clock        },
   { key: "Accepted",  label: "Accepted",           desc: "Chef confirmed ingredients",    icon: CheckCircle2 },
   { key: "Preparing", label: "In Kitchen",         desc: "Active cooking on burner/wok",  icon: ChefHat      },
-  { key: "Ready",     label: "Ready for Pickup",   desc: "Waiting at serving counter",    icon: Bell         },
+  { key: "Ready",     label: "Ready for Pickup",   desc: "Waiting at serving counter",    icon: BellPlaceholder },
   { key: "Collected", label: "Order Collected",    desc: "Handed over to student",        icon: PackageCheck },
 ];
 
+function BellPlaceholder(props) {
+  return (
+    <svg {...props} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+    </svg>
+  );
+}
+
 const STATUS_ORDER = ["Placed", "Accepted", "Preparing", "Ready", "Collected"];
+
+function formatTimeRemaining(placedAt, expiryMinutes = 10) {
+  if (!placedAt) return `${expiryMinutes}:00`;
+  const placedTime = new Date(placedAt).getTime();
+  const expiryTime = placedTime + expiryMinutes * 60 * 1000;
+  const now = Date.now();
+  const diff = Math.max(0, expiryTime - now);
+  const minutes = Math.floor(diff / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
 
 export default function OrderTracking({
   orders = [],
   activeOrderId,
+  studentUSN,
   onSelectOrder,
-  onUpdateStatus,
   onCancelOrder,
   onNewOrderClick,
-  onDemoReset,
 }) {
   const [copiedToken, setCopiedToken] = useState(false);
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState("");
+  const [showQRModal, setShowQRModal] = useState(false);
+  const [timeRemainingStr, setTimeRemainingStr] = useState("10:00");
 
-  const currentOrder = orders.find((o) => o.id === activeOrderId) || orders[0];
+  // 1. Persistent dismissed order IDs per USN in localStorage
+  const storageKey = `smartcanteen_dismissed_orders_${(studentUSN || "guest").toUpperCase()}`;
+  
+  const [dismissedIds, setDismissedIds] = useState(() => {
+    try {
+      const stored = localStorage.getItem(storageKey);
+      return stored ? JSON.parse(stored) : [];
+    } catch (e) {
+      console.warn("Could not read dismissed orders from localStorage:", e);
+      return [];
+    }
+  });
 
+  // Re-sync dismissed IDs when studentUSN changes
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(storageKey);
+      setDismissedIds(stored ? JSON.parse(stored) : []);
+    } catch (e) {
+      console.warn("Could not read dismissed orders from localStorage:", e);
+    }
+  }, [storageKey]);
+
+  const handleDismissOrder = (orderId) => {
+    sound.playClick();
+    setDismissedIds((prev) => {
+      const updated = Array.from(new Set([...prev, orderId]));
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+      } catch (e) {
+        console.warn("Could not write dismissed orders to localStorage:", e);
+      }
+      return updated;
+    });
+  };
+
+  // Student tracking shows ONLY that USN's orders (excluding dismissed)
+  const studentOrders = useMemo(() => {
+    const raw = studentUSN
+      ? orders.filter(
+          (o) => (o.studentRoll || "").trim().toUpperCase() === studentUSN.trim().toUpperCase()
+        )
+      : orders;
+    return raw.filter((o) => !dismissedIds.includes(o.id) && !dismissedIds.includes(o._uuid));
+  }, [orders, studentUSN, dismissedIds]);
+
+  const currentOrder = studentOrders.find((o) => o.id === activeOrderId) || studentOrders[0];
+
+  const isPendingApproval = currentOrder?.status === "pending_approval";
   const isCancelled = currentOrder?.status === "Cancelled";
+  const isReady     = currentOrder?.status === "Ready";
+
   const currentStepIndex = currentOrder
     ? STATUS_ORDER.indexOf(currentOrder.status)
     : 0;
 
-  const isReady     = currentOrder?.status === "Ready";
-  const isCollected = currentOrder?.status === "Collected";
-  const canCancel   = currentOrder &&
-    ["Placed", "Accepted", "Preparing"].includes(currentOrder.status);
+  // Cancellation allowed for pending_approval, Placed, Accepted, and Preparing
+  const canCancel = currentOrder &&
+    ["pending_approval", "Placed", "Accepted", "Preparing"].includes(currentOrder.status);
+
+  // Live 1-second countdown ticker for pending counter payment
+  useEffect(() => {
+    if (!isPendingApproval || !currentOrder?.placedAt) return;
+    const interval = setInterval(() => {
+      setTimeRemainingStr(formatTimeRemaining(currentOrder.placedAt, 10));
+    }, 1000);
+    setTimeRemainingStr(formatTimeRemaining(currentOrder.placedAt, 10));
+    return () => clearInterval(interval);
+  }, [isPendingApproval, currentOrder?.placedAt]);
 
   // Trigger audio bell and celebration confetti when status is Ready.
   useEffect(() => {
@@ -72,28 +152,22 @@ export default function OrderTracking({
     setTimeout(() => setCopiedToken(false), 2000);
   };
 
-  // Advance forward only — no backwards cycling.
-  const advanceNextStatus = async () => {
-    if (!currentOrder || isCancelled) return;
-    const nextIdx = currentStepIndex + 1;
-    if (nextIdx >= STATUS_ORDER.length) return; // Already at Collected — no-op.
-    const nextStatus = STATUS_ORDER[nextIdx];
-    sound.playClick();
-    await onUpdateStatus(currentOrder.id, nextStatus);
-  };
-
   const handleCancel = async () => {
     if (!currentOrder) return;
     setIsCancelling(true);
     setCancelError("");
-    const res = await onCancelOrder(currentOrder.id, "Cancelled by student");
+    const res = await onCancelOrder(currentOrder.id, "Cancelled by student", studentUSN);
     setIsCancelling(false);
     if (res?.ok) {
       setCancelConfirm(false);
     } else {
-      setCancelError(res?.reason === "illegal_transition"
-        ? "This order can no longer be cancelled."
-        : (res?.message || "Could not cancel. Please try again."));
+      setCancelError(
+        res?.reason === "forbidden_usn_mismatch"
+          ? "Unauthorized: You can only cancel your own orders."
+          : res?.reason === "illegal_transition"
+          ? "This order can no longer be cancelled."
+          : (res?.message || "Could not cancel. Please try again.")
+      );
     }
   };
 
@@ -103,7 +177,9 @@ export default function OrderTracking({
         <Clock className="w-16 h-16 text-slate-400 mx-auto mb-4" />
         <h3 className="text-xl font-bold text-white">No active orders right now</h3>
         <p className="text-sm text-slate-400 mt-2 mb-6">
-          You haven't placed any canteen orders yet. Order your favourite food ahead to skip queues.
+          {studentUSN
+            ? `No orders found for USN ${studentUSN}. Order your favourite food ahead to skip queues.`
+            : "You haven't placed any canteen orders yet. Order your favourite food ahead to skip queues."}
         </p>
         <button
           onClick={onNewOrderClick}
@@ -115,6 +191,9 @@ export default function OrderTracking({
     );
   }
 
+  // Payload: "SC:<orderId>:<token>"
+  const qrPayload = `SC:${currentOrder._uuid || currentOrder.id}:${currentOrder.token || currentOrder.id}`;
+
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
 
@@ -122,7 +201,7 @@ export default function OrderTracking({
       <div className="mb-6 flex items-center justify-between gap-3 flex-wrap">
         <div>
           <span className="text-[11px] font-mono text-amber-400 font-bold uppercase tracking-wider">
-            LIVE CANTEEN TRACKING
+            LIVE CANTEEN TRACKING {studentUSN ? `• ${studentUSN}` : ""}
           </span>
           <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
             Order Status & Counter Pickup
@@ -130,31 +209,88 @@ export default function OrderTracking({
         </div>
 
         {/* Multi-Order Switcher Pill */}
-        {orders.length > 1 && (
+        {studentOrders.length > 1 && (
           <div className="flex items-center gap-1.5 p-1 rounded-xl bg-[#121624] border border-white/10 overflow-x-auto">
-            {orders.map((o) => (
-              <button
-                key={o.id}
-                onClick={() => {
-                  sound.playClick();
-                  onSelectOrder(o.id);
-                }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all ${
-                  o.id === currentOrder.id
-                    ? "bg-amber-500 text-black shadow-sm"
-                    : "text-slate-400 hover:text-white"
-                }`}
-              >
-                {o.id}
-                {o.status === "Ready" && " ⚡"}
-                {o.status === "Cancelled" && " ✕"}
-              </button>
-            ))}
+            {studentOrders.map((o) => {
+              const isOrdCancelled = o.status === "Cancelled";
+              const isSelected = o.id === currentOrder.id;
+
+              return (
+                <div
+                  key={o.id}
+                  onClick={() => {
+                    sound.playClick();
+                    onSelectOrder(o.id);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    isSelected
+                      ? "bg-amber-500 text-black shadow-sm"
+                      : "text-slate-400 hover:text-white bg-white/[0.04]"
+                  }`}
+                >
+                  <span>{o.id}</span>
+                  {o.status === "pending_approval" && <span>⏳</span>}
+                  {o.status === "Ready" && <span>⚡</span>}
+
+                  {/* ✕ button ONLY on Cancelled/Rejected/Expired tabs */}
+                  {isOrdCancelled && (
+                    <button
+                      type="button"
+                      title="Dismiss cancelled order from view"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDismissOrder(o.id);
+                      }}
+                      className={`p-0.5 rounded hover:bg-black/30 transition-colors ${
+                        isSelected ? "text-black hover:text-red-900" : "text-red-400 hover:text-red-300"
+                      }`}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Cancelled State Alert */}
+      {/* ────────────────────────────────────────────────────────────────────
+          AWAITING COUNTER CONFIRMATION ALERT (Pay-at-Counter)
+      ──────────────────────────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {isPendingApproval && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: -10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="mb-8 p-6 rounded-3xl bg-gradient-to-r from-amber-950/90 via-[#22180c] to-amber-900/40 border-2 border-amber-500 shadow-2xl shadow-amber-500/20 text-center relative overflow-hidden"
+          >
+            <div className="absolute -top-12 -right-12 w-40 h-40 bg-amber-400/20 rounded-full blur-3xl pointer-events-none" />
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/40 text-xs font-mono font-bold uppercase mb-3 animate-pulse">
+              <Hourglass className="w-3.5 h-3.5" />
+              AWAITING COUNTER CONFIRMATION
+            </div>
+            <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+              Pay ₹{currentOrder.totalAmount} at {currentOrder.counter || "Counter"}
+            </h2>
+            <p className="text-sm text-amber-200/90 mt-2 max-w-lg mx-auto">
+              Please walk up to the designated counter and pay in cash to confirm your order. Your dish ingredients are reserved for you.
+            </p>
+
+            <div className="mt-4 flex items-center justify-center gap-3">
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-black/50 border border-amber-500/40 text-amber-300 font-mono text-xs font-bold">
+                <Timer className="w-4 h-4 text-amber-400" />
+                <span>Time to confirm payment: <strong>{timeRemainingStr}</strong></span>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ────────────────────────────────────────────────────────────────────
+          CANCELLED / EXPIRED / REJECTED ALERT
+      ──────────────────────────────────────────────────────────────────── */}
       <AnimatePresence>
         {isCancelled && (
           <motion.div
@@ -166,10 +302,18 @@ export default function OrderTracking({
             <div className="absolute -top-12 -right-12 w-40 h-40 bg-red-400/20 rounded-full blur-3xl pointer-events-none" />
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-400/20 text-red-300 border border-red-400/40 text-xs font-mono font-bold uppercase mb-3">
               <XCircle className="w-3.5 h-3.5" />
-              ORDER CANCELLED
+              {currentOrder.cancelReason?.includes("Expired")
+                ? "ORDER EXPIRED"
+                : currentOrder.cancelReason?.includes("Reject") || currentOrder.cancelReason?.includes("declined")
+                ? "PAYMENT DECLINED / REJECTED"
+                : "ORDER CANCELLED"}
             </div>
             <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
-              This order has been cancelled
+              {currentOrder.cancelReason?.includes("Expired")
+                ? "Counter Payment Timed Out"
+                : currentOrder.cancelReason?.includes("Reject")
+                ? "Order Rejected at Counter"
+                : "This order has been cancelled"}
             </h2>
             {currentOrder.cancelledDuringPrep && (
               <p className="text-sm text-red-300/90 mt-2">
@@ -177,13 +321,28 @@ export default function OrderTracking({
               </p>
             )}
             {currentOrder.cancelReason && (
-              <p className="text-xs text-slate-400 mt-1">Reason: {currentOrder.cancelReason}</p>
+              <p className="text-xs text-slate-300 mt-2">
+                Reason: {currentOrder.cancelReason}
+              </p>
             )}
+
+            {/* Dismiss Button */}
+            <div className="mt-4 flex justify-center">
+              <button
+                onClick={() => handleDismissOrder(currentOrder.id)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold border border-white/20 transition-all active:scale-95"
+              >
+                <X className="w-4 h-4" />
+                <span>Dismiss Cancelled Order</span>
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Ready for Pickup Alert */}
+      {/* ────────────────────────────────────────────────────────────────────
+          READY FOR PICKUP ALERT
+      ──────────────────────────────────────────────────────────────────── */}
       <AnimatePresence>
         {isReady && (
           <motion.div
@@ -230,9 +389,15 @@ export default function OrderTracking({
               <span className={`text-xs px-2 py-0.5 rounded-md font-mono font-semibold border ${
                 isCancelled
                   ? "bg-red-500/20 text-red-300 border-red-500/40"
-                  : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                  : isPendingApproval
+                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                  : "bg-cyan-500/20 text-cyan-300 border-cyan-500/40"
               }`}>
-                {isCancelled ? "Cancelled" : `${currentOrder.priority} Priority`}
+                {isCancelled
+                  ? "Cancelled"
+                  : isPendingApproval
+                  ? "Pending Counter Approval"
+                  : `${currentOrder.priority} Priority`}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1 font-mono">
@@ -243,13 +408,17 @@ export default function OrderTracking({
           {/* Token Box with Quick Copy */}
           <div className="flex items-center gap-3">
             <div className={`p-3 sm:p-4 rounded-2xl border text-right ${
-              isCancelled ? "bg-[#141826] border-red-500/30" : "bg-[#141826] border-amber-500/30"
+              isCancelled
+                ? "bg-[#141826] border-red-500/30"
+                : isPendingApproval
+                ? "bg-[#141826] border-amber-500/30"
+                : "bg-[#141826] border-emerald-500/30"
             }`}>
               <div className="text-[10px] font-mono text-slate-400 uppercase tracking-widest font-semibold">
                 PICKUP TOKEN
               </div>
               <div className={`font-mono text-2xl sm:text-3xl font-extrabold tracking-wider ${
-                isCancelled ? "text-red-400 line-through" : "text-amber-400"
+                isCancelled ? "text-red-400 line-through" : isPendingApproval ? "text-amber-400" : "text-emerald-400"
               }`}>
                 #{currentOrder.token || currentOrder.id.replace("CN-", "")}
               </div>
@@ -264,95 +433,82 @@ export default function OrderTracking({
           </div>
         </div>
 
-        {/* Stepper Timeline */}
-        {!isCancelled && (
-          <div className="py-8">
-            <div className="relative">
-              <div className="hidden sm:block absolute top-1/2 left-0 right-0 h-1 bg-[#1a1f30] -translate-y-1/2 z-0" />
-              <div
-                className="hidden sm:block absolute top-1/2 left-0 h-1 bg-gradient-to-r from-amber-500 to-emerald-400 -translate-y-1/2 z-0 transition-all duration-700"
-                style={{ width: `${(currentStepIndex / (TIMELINE_STEPS.length - 1)) * 100}%` }}
-              />
-              <div className="grid grid-cols-1 sm:grid-cols-5 gap-6 sm:gap-2 relative z-10">
-                {TIMELINE_STEPS.map((step, idx) => {
-                  const Icon = step.icon;
-                  const isPassed = idx <= currentStepIndex;
-                  const isCurrent = idx === currentStepIndex;
-                  return (
-                    <div key={step.key} className="flex sm:flex-col items-center sm:items-center gap-3 text-left sm:text-center">
-                      <motion.div
-                        animate={isCurrent ? { scale: [1, 1.1, 1] } : { scale: 1 }}
-                        transition={{ duration: 1.5, repeat: isCurrent ? Infinity : 0 }}
-                        className={`w-12 h-12 rounded-2xl flex items-center justify-center border-2 transition-all shrink-0 ${
-                          isCurrent
-                            ? "bg-amber-500 text-black border-amber-300 shadow-lg shadow-amber-500/30"
-                            : isPassed
-                            ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/60"
-                            : "bg-[#111422] text-slate-400 border-white/10"
-                        }`}
-                      >
-                        <Icon className="w-5 h-5" />
-                      </motion.div>
-                      <div>
-                        <div className={`text-xs sm:text-sm font-bold leading-tight ${
-                          isCurrent ? "text-amber-300" : isPassed ? "text-white" : "text-slate-400"
-                        }`}>
-                          {step.label}
-                        </div>
-                        <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-                          {step.desc}
-                        </div>
-                      </div>
+        {/* Status Timeline */}
+        <div className="py-8">
+          <div className="relative flex items-center justify-between">
+            {/* Background Line */}
+            <div className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-1 bg-white/[0.06] z-0" />
+            
+            {/* Active Progress Line */}
+            <div
+              className="absolute left-0 top-1/2 -translate-y-1/2 h-1 bg-gradient-to-r from-amber-500 to-emerald-400 z-0 transition-all duration-500"
+              style={{
+                width: isPendingApproval ? "0%" : `${(Math.max(0, currentStepIndex) / (TIMELINE_STEPS.length - 1)) * 100}%`,
+              }}
+            />
+
+            {TIMELINE_STEPS.map((step, idx) => {
+              const Icon = step.icon;
+              const isPast = !isPendingApproval && idx < currentStepIndex;
+              const isCurrent = !isPendingApproval && idx === currentStepIndex;
+
+              return (
+                <div key={step.key} className="relative z-10 flex flex-col items-center group">
+                  <div
+                    className={`w-10 h-10 sm:w-12 sm:h-12 rounded-2xl border-2 flex items-center justify-center transition-all duration-300 ${
+                      isPast
+                        ? "bg-emerald-500 border-emerald-400 text-black shadow-lg shadow-emerald-500/20"
+                        : isCurrent
+                        ? "bg-amber-500 border-amber-300 text-black shadow-lg shadow-amber-500/30 scale-110"
+                        : "bg-[#141724] border-white/10 text-slate-500"
+                    }`}
+                  >
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <div className="mt-2.5 text-center hidden sm:block">
+                    <div className={`text-xs font-bold ${isCurrent ? "text-amber-400" : isPast ? "text-white" : "text-slate-500"}`}>
+                      {step.label}
                     </div>
-                  );
-                })}
+                    <div className="text-[10px] text-slate-400 max-w-[80px] leading-tight mt-0.5">
+                      {step.desc}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Counter Info & Digital Pass */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-white/[0.08]">
+          <div className="p-4 rounded-2xl bg-[#111422] border border-white/[0.06] flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+              <MapPin className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="text-[10px] font-mono text-slate-400 uppercase">COLLECTION COUNTER</div>
+              <div className="text-sm font-bold text-white mt-0.5">{currentOrder.counter || "Counter 1"}</div>
+              <div className="text-[11px] text-slate-400">
+                {isPendingApproval
+                  ? "Pay cash here to confirm order"
+                  : `Estimated Pickup: ${currentOrder.promisedPickupTime || "Ready soon"}`}
               </div>
             </div>
           </div>
-        )}
 
-        {/* Counter Directions & ETA Stats Grid */}
-        <div className={`grid grid-cols-1 md:grid-cols-3 gap-4 ${isCancelled ? "mt-6" : "pt-6"} border-t border-white/[0.08]`}>
-          <div className="p-4 rounded-2xl bg-[#131625] border border-white/[0.06]">
-            <div className="flex items-center gap-2 text-xs font-mono text-slate-400 mb-1">
-              <MapPin className="w-4 h-4 text-amber-400" />
-              <span>COLLECTION COUNTER</span>
-            </div>
-            <div className="text-lg font-bold text-white">{currentOrder.counter}</div>
-            <div className="text-xs text-slate-400 mt-0.5">
-              Pickup window: {currentOrder.promisedPickupTime}
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#131625] border border-white/[0.06]">
-            <div className="flex items-center gap-2 text-xs font-mono text-slate-400 mb-1">
-              <Clock className="w-4 h-4 text-cyan-400" />
-              <span>TIME REMAINING</span>
-            </div>
-            <div className="text-lg font-bold font-mono text-cyan-300">
-              {isCancelled
-                ? "—"
-                : isCollected
-                ? "Completed"
-                : isReady
-                ? "Ready Now"
-                : `~${currentOrder.estimatedMinutesRemaining} mins`}
-            </div>
-            <div className="text-xs text-slate-400 mt-0.5">
-              Promised: {currentOrder.promisedPickupTime}
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#131625] border border-white/[0.06] flex items-center justify-between">
+          <button
+            onClick={() => setShowQRModal(true)}
+            className="p-4 rounded-2xl bg-[#111422] hover:bg-[#15192b] border border-white/[0.06] hover:border-amber-500/30 transition-all flex items-center justify-between text-left group"
+          >
             <div>
               <div className="text-xs font-mono text-slate-400 mb-1">DIGITAL COUNTER PASS</div>
-              <div className="text-xs font-semibold text-white">Tap to display QR</div>
-              <div className="text-[10px] text-slate-400">Scan at smart dispenser</div>
+              <div className="text-xs font-semibold text-white group-hover:text-amber-400 transition-colors">Tap to display QR</div>
+              <div className="text-[10px] text-slate-400">Scan at counter or kiosk</div>
             </div>
-            <div className="w-12 h-12 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-300">
+            <div className="w-12 h-12 rounded-xl bg-white/5 group-hover:bg-amber-500/10 border border-white/10 group-hover:border-amber-500/30 flex items-center justify-center text-slate-300 transition-colors">
               <QrCode className="w-7 h-7 text-amber-400" />
             </div>
-          </div>
+          </button>
         </div>
 
         {/* Ordered Items Breakdown */}
@@ -396,6 +552,8 @@ export default function OrderTracking({
                   <AlertTriangle className="w-4 h-4" />
                   {currentOrder.status === "Preparing"
                     ? "This order is already being prepared. Cancelling will NOT restore stock. Proceed?"
+                    : currentOrder.status === "pending_approval"
+                    ? "Cancel this unpaid counter order and release reserved items?"
                     : "Are you sure you want to cancel this order?"}
                 </div>
                 {cancelError && (
@@ -421,43 +579,56 @@ export default function OrderTracking({
           </div>
         )}
 
-        {/* Hackathon Demo Controller */}
-        <div className="mt-6 p-4 rounded-2xl bg-amber-500/[0.04] border border-amber-500/20 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs text-slate-300">
-            <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>
-              <strong>Hackathon Demo Controller:</strong> Simulate kitchen status progression in real time.
-            </span>
-          </div>
-
-          <div className="flex gap-2 w-full sm:w-auto">
-            <button
-              onClick={advanceNextStatus}
-              disabled={isCancelled || isCollected}
-              className="flex-1 sm:flex-none px-4 py-2 rounded-xl bg-white/[0.08] hover:bg-white/15 text-white text-xs font-mono font-semibold flex items-center justify-center gap-2 border border-white/10 transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
-              <span>
-                {isCancelled
-                  ? "Cancelled"
-                  : isCollected
-                  ? "Collected ✓"
-                  : `→ ${STATUS_ORDER[currentStepIndex + 1] || "Done"}`}
-              </span>
-            </button>
-
-            <button
-              onClick={async () => { sound.playClick(); await onDemoReset?.(); }}
-              className="px-4 py-2 rounded-xl bg-white/[0.05] hover:bg-white/10 text-slate-400 hover:text-white text-xs font-mono flex items-center gap-1.5 border border-white/10 transition-all active:scale-95"
-              title="Reset all demo orders and restore stock"
-            >
-              <RefreshCw className="w-3 h-3" />
-              Reset
-            </button>
-          </div>
-        </div>
-
       </div>
+
+      {/* QR Code Modal */}
+      <AnimatePresence>
+        {showQRModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="relative w-full max-w-sm rounded-3xl bg-[#0f121d] border border-amber-500/30 p-6 text-center shadow-2xl overflow-hidden"
+            >
+              <div className="absolute top-4 right-4">
+                <button
+                  onClick={() => setShowQRModal(false)}
+                  className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-[11px] font-mono text-amber-400 font-bold uppercase tracking-wider mb-3">
+                <QrCode className="w-3.5 h-3.5" />
+                COUNTER PICKUP PASS
+              </div>
+
+              <h3 className="text-xl font-bold text-white mb-1">
+                Order #{currentOrder.token || currentOrder.id}
+              </h3>
+              <p className="text-xs text-slate-400 mb-6 font-mono">
+                {currentOrder.studentRoll} • {currentOrder.counter}
+              </p>
+
+              <div className="p-4 bg-white rounded-2xl mx-auto w-fit shadow-xl border-4 border-amber-400">
+                <QRCodeSVG
+                  value={qrPayload}
+                  size={190}
+                  level="H"
+                  includeMargin={false}
+                />
+              </div>
+
+              <p className="text-[11px] text-slate-400 mt-4 leading-relaxed">
+                Present this QR code to the cashier or dispenser scanner at {currentOrder.counter}
+              </p>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
     </div>
   );
 }

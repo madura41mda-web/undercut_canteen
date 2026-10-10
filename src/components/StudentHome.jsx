@@ -54,7 +54,7 @@ export default function StudentHome({
                             item.category.toLowerCase().includes(searchQuery.toLowerCase());
       
       const matchesCategory = selectedCategory === "All Items" || item.category === selectedCategory;
-      const matchesAvailable = onlyAvailable ? item.stock > 0 : true;
+      const matchesAvailable = onlyAvailable ? (item.stock > 0 && item.isAvailable !== false) : true;
       const matchesFastPrep = fastPrepOnly ? item.prepTimeMinutes <= QUICK_PREP_MAX_MINUTES : true;
 
       return matchesSearch && matchesCategory && matchesAvailable && matchesFastPrep;

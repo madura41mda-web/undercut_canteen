@@ -8,7 +8,9 @@ import {
   Sparkles,
   Zap,
   Users,
-  WifiOff
+  WifiOff,
+  LogOut,
+  GraduationCap
 } from "lucide-react";
 import { sound } from "../utils/audio";
 import { ROLES, can } from "../lib/role";
@@ -23,6 +25,9 @@ export default function Navbar({
   kitchenLoad = 0,
   currentRole,
   onSwitchRole,
+  onLogout,
+  studentUSN = "",
+  onChangeUSN,
   realtimeStatus = "connected"
 }) {
   // Determine allowed navigation items strictly according to currentRole
@@ -168,22 +173,54 @@ export default function Navbar({
               </span>
             </div>
 
-            {/* Switch Role Button */}
-            {currentRole && (
+            {/* Student USN Badge with Change USN button */}
+            {currentRole === ROLES.STUDENT && (
               <button
                 onClick={() => {
                   sound.playClick();
-                  onSwitchRole();
+                  if (onChangeUSN) onChangeUSN();
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl border text-xs font-mono font-semibold transition-all hover:opacity-90 active:scale-95 ${
-                  rolePillColors[currentRole] || "bg-white/5 border-white/10 text-slate-300"
-                }`}
-                title="Switch active persona (Student / Kitchen / Manager)"
+                className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl bg-[#121520] hover:bg-[#181d2e] border border-amber-500/30 text-xs font-mono text-amber-300 transition-all active:scale-95 cursor-pointer shadow-sm"
+                title="Change Student USN"
               >
-                <Users className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Role:</span>
-                <strong className="underline underline-offset-2">{roleLabels[currentRole] || currentRole}</strong>
+                <GraduationCap className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden sm:inline">USN:</span>
+                <strong className="underline underline-offset-2">{studentUSN || "Set USN"}</strong>
+                <span className="text-[10px] text-slate-400 font-sans hidden md:inline ml-0.5">Change</span>
               </button>
+            )}
+
+            {/* Switch Role & Log Out Buttons */}
+            {currentRole && (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => {
+                    sound.playClick();
+                    onSwitchRole();
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl border text-xs font-mono font-semibold transition-all hover:opacity-90 active:scale-95 ${
+                    rolePillColors[currentRole] || "bg-white/5 border-white/10 text-slate-300"
+                  }`}
+                  title="Switch active role"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Role:</span>
+                  <strong className="underline underline-offset-2">{roleLabels[currentRole] || currentRole}</strong>
+                </button>
+
+                <button
+                  onClick={() => {
+                    sound.playClick();
+                    if (onLogout) onLogout();
+                    else onSwitchRole();
+                  }}
+                  className="px-2.5 py-1.5 sm:py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-mono text-slate-400 hover:text-white transition-all flex items-center gap-1"
+                  title="Log out (clear session)"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span className="hidden md:inline">Log out</span>
+                </button>
+              </div>
             )}
 
             {/* Cart Drawer Trigger (Student Only) */}

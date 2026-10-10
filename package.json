@@ -15,6 +15,7 @@
     "canvas-confetti": "^1.9.4",
     "lucide-react": "^1.55.0",
     "motion": "^14.1.0",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "tailwindcss": "^4.3.3"

@@ -1,20 +1,24 @@
 import { motion } from "motion/react";
-import { Clock, Plus, Minus, Flame, Check, AlertTriangle, XCircle } from "lucide-react";
+import { Clock, Plus, Minus, Flame, Check, AlertTriangle, XCircle, PauseCircle } from "lucide-react";
 import { sound } from "../utils/audio";
 
+const DEFAULT_PLACEHOLDER_IMAGE = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&auto=format&fit=crop&q=80";
+
 export default function FoodCard({ item, inCartQuantity = 0, onAdd, onUpdateQuantity }) {
+  const isTemporarilyUnavailable = item.isAvailable === false;
   const isSoldOut = item.stock <= 0;
-  const isLowStock = item.stock > 0 && item.stock <= 4;
+  const isLowStock = !isSoldOut && !isTemporarilyUnavailable && item.stock <= 4;
+  const cannotOrder = isSoldOut || isTemporarilyUnavailable;
 
   const handleAdd = () => {
-    if (isSoldOut) return;
+    if (cannotOrder) return;
     sound.playClick();
     onAdd(item);
   };
 
   const handleIncrement = (e) => {
     e.stopPropagation();
-    if (inCartQuantity >= item.stock) return;
+    if (cannotOrder || inCartQuantity >= item.stock) return;
     sound.playClick();
     onUpdateQuantity(item.id, inCartQuantity + 1);
   };
@@ -33,7 +37,7 @@ export default function FoodCard({ item, inCartQuantity = 0, onAdd, onUpdateQuan
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ type: "spring", stiffness: 350, damping: 25 }}
       className={`group relative flex flex-col rounded-2xl bg-[#0f121d] border overflow-hidden transition-all duration-300 ${
-        isSoldOut 
+        cannotOrder 
           ? "border-white/[0.05] opacity-70" 
           : "border-white/[0.08] hover:border-amber-500/40 hover:shadow-2xl hover:shadow-amber-500/10"
       }`}
@@ -41,11 +45,16 @@ export default function FoodCard({ item, inCartQuantity = 0, onAdd, onUpdateQuan
       {/* Food Imagery Container */}
       <div className="relative w-full h-48 sm:h-52 bg-slate-900 overflow-hidden select-none">
         <img
-          src={item.image}
+          src={item.image || DEFAULT_PLACEHOLDER_IMAGE}
           alt={item.name}
           loading="lazy"
+          onError={(e) => {
+            if (e.currentTarget.src !== DEFAULT_PLACEHOLDER_IMAGE) {
+              e.currentTarget.src = DEFAULT_PLACEHOLDER_IMAGE;
+            }
+          }}
           className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 ${
-            isSoldOut ? "grayscale contrast-75" : ""
+            cannotOrder ? "grayscale contrast-75" : ""
           }`}
         />
         <div className="absolute inset-0 bg-gradient-to-t from-[#0f121d] via-[#0f121d]/20 to-transparent" />
@@ -59,7 +68,12 @@ export default function FoodCard({ item, inCartQuantity = 0, onAdd, onUpdateQuan
           </span>
 
           {/* Stock Availability Pill */}
-          {isSoldOut ? (
+          {isTemporarilyUnavailable ? (
+            <span className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold backdrop-blur-md bg-amber-950/90 text-amber-300 border border-amber-500/40">
+              <PauseCircle className="w-3 h-3 text-amber-400" />
+              Unavailable right now
+            </span>
+          ) : isSoldOut ? (
             <span className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold backdrop-blur-md bg-red-950/80 text-red-300 border border-red-500/30">
               <XCircle className="w-3 h-3 text-red-400" />
               Sold Out
@@ -126,12 +140,16 @@ export default function FoodCard({ item, inCartQuantity = 0, onAdd, onUpdateQuan
             </span>
           </div>
 
-          {isSoldOut ? (
+          {cannotOrder ? (
             <button
               disabled
-              className="px-4 py-2 rounded-xl bg-white/[0.05] text-slate-400 text-xs font-semibold cursor-not-allowed border border-white/[0.08]"
+              className={`px-3.5 py-2 rounded-xl text-xs font-semibold cursor-not-allowed border ${
+                isTemporarilyUnavailable
+                  ? "bg-amber-500/10 text-amber-300/80 border-amber-500/20"
+                  : "bg-white/[0.05] text-slate-400 border-white/[0.08]"
+              }`}
             >
-              Unavailable
+              {isTemporarilyUnavailable ? "Unavailable right now" : "Sold out"}
             </button>
           ) : inCartQuantity > 0 ? (
             <div className="flex items-center rounded-xl bg-[#1a1f2e] border border-amber-500/40 p-1 shadow-md">

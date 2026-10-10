@@ -1,10 +1,9 @@
 /**
- * Role-Based Access Control (RBAC) - Single Source of Truth
- *
- * Exposes currentRole ('student' | 'kitchen' | 'manager'), setRole, and can(action).
- * In Stage 2, this will seamlessly connect to Supabase Auth (auth.uid() -> profiles.role)
- * without requiring rewrites in UI components.
+ * Role-Based Access Control (RBAC) & Passcode Authentication
+ * Single Source of Truth for Role Permissions & Session Management
  */
+
+import { supabase } from "./supabaseClient";
 
 export const ROLES = {
   STUDENT: "student",
@@ -20,14 +19,16 @@ export const ROLE_DETAILS = {
     desc: "Browse live menu, order food with guaranteed pickup times, and track orders in real time.",
     hash: "#/student",
     defaultTab: "student",
+    requiresPin: false,
   },
   [ROLES.KITCHEN]: {
     id: ROLES.KITCHEN,
     label: "Kitchen Staff",
     title: "Kitchen Command Center",
-    desc: "Kitchen display unit (KDU), item-level batch cooking, live 86 stock toggles, and status progression.",
+    desc: "Kitchen display unit (KDU), item-level batch cooking, live stock & availability controls, and status progression.",
     hash: "#/kitchen",
     defaultTab: "kitchen",
+    requiresPin: true,
   },
   [ROLES.MANAGER]: {
     id: ROLES.MANAGER,
@@ -36,6 +37,7 @@ export const ROLE_DETAILS = {
     desc: "Executive capacity thresholds, rush multipliers, inventory quota controls, and menu archiving.",
     hash: "#/manager",
     defaultTab: "manager",
+    requiresPin: true,
   },
 };
 
@@ -56,6 +58,8 @@ const PERMISSIONS = {
   "dish:add": [ROLES.KITCHEN, ROLES.MANAGER],
   "dish:restock": [ROLES.KITCHEN, ROLES.MANAGER],
   "dish:86": [ROLES.KITCHEN, ROLES.MANAGER],
+  "dish:set_stock": [ROLES.KITCHEN, ROLES.MANAGER],
+  "pickup:verify": [ROLES.KITCHEN, ROLES.MANAGER],
 
   // Manager capabilities
   "dish:archive": [ROLES.MANAGER],
@@ -70,6 +74,7 @@ const PERMISSIONS = {
 };
 
 const STORAGE_KEY = "smartcanteen_role";
+const SESSION_TOKEN_KEY = "smartcanteen_session_token";
 
 let _currentRole = null;
 const _roleListeners = new Set();
@@ -77,13 +82,20 @@ const _roleListeners = new Set();
 /** Parse role from URL hash or sessionStorage */
 function getInitialRole() {
   const hash = window.location.hash.toLowerCase();
+  const token = sessionStorage.getItem(SESSION_TOKEN_KEY);
+
   if (hash.includes("student")) return ROLES.STUDENT;
-  if (hash.includes("kitchen")) return ROLES.KITCHEN;
-  if (hash.includes("manager")) return ROLES.MANAGER;
+  if (hash.includes("kitchen")) {
+    return token ? ROLES.KITCHEN : null;
+  }
+  if (hash.includes("manager")) {
+    return token ? ROLES.MANAGER : null;
+  }
 
   const stored = sessionStorage.getItem(STORAGE_KEY);
   if (stored && Object.values(ROLES).includes(stored)) {
-    return stored;
+    if (stored === ROLES.STUDENT) return stored;
+    return token ? stored : null;
   }
   return null;
 }
@@ -95,17 +107,65 @@ export const RoleService = {
     return _currentRole;
   },
 
-  setRole(newRole) {
+  getSessionToken() {
+    return sessionStorage.getItem(SESSION_TOKEN_KEY) || null;
+  },
+
+  setSessionToken(token) {
+    if (token) {
+      sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+    } else {
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    }
+  },
+
+  setRole(newRole, sessionToken = null) {
     if (!newRole) {
       _currentRole = null;
       sessionStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(SESSION_TOKEN_KEY);
       window.location.hash = "";
     } else if (Object.values(ROLES).includes(newRole)) {
       _currentRole = newRole;
       sessionStorage.setItem(STORAGE_KEY, newRole);
+      if (sessionToken) {
+        sessionStorage.setItem(SESSION_TOKEN_KEY, sessionToken);
+      }
       window.location.hash = `#/${newRole}`;
     }
     _roleListeners.forEach((fn) => fn(_currentRole));
+  },
+
+  logout() {
+    this.setRole(null);
+  },
+
+  async verifyPasscode(role, pin) {
+    try {
+      const { data, error } = await supabase.rpc("verify_passcode", {
+        p_role: role,
+        p_code: String(pin).trim(),
+      });
+
+      if (error) {
+        console.error("[RoleService] verify_passcode error:", error);
+        return { ok: false, message: error.message };
+      }
+
+      if (data?.ok && data.session_token) {
+        this.setRole(role, data.session_token);
+        return { ok: true, session_token: data.session_token };
+      }
+
+      return {
+        ok: false,
+        reason: data?.reason || "invalid_pin",
+        message: data?.message || "Invalid 6-digit PIN code.",
+      };
+    } catch (err) {
+      console.error("[RoleService] verifyPasscode exception:", err);
+      return { ok: false, message: "Could not connect to authentication service." };
+    }
   },
 
   can(action, roleOverride = null) {
@@ -126,7 +186,7 @@ export const RoleService = {
   },
 };
 
-/** Standalone convenience function */
+/** Standalone convenience helper */
 export function can(action) {
   return RoleService.can(action);
 }

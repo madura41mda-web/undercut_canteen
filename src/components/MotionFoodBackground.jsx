@@ -1,5 +1,3 @@
-import { motion } from "motion/react";
-
 // Curated high quality food items for floating background in motion
 const FLOATING_FOODS = [
   {

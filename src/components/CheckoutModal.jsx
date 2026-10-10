@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 import {
   X,
   Clock,
@@ -7,15 +7,20 @@ import {
   Smartphone,
   Wallet,
   AlertTriangle,
-  CheckCircle,
   Zap,
   ShieldCheck,
-  Sparkles,
   ArrowRight,
   Info
 } from "lucide-react";
 import confetti from "canvas-confetti";
 import { sound } from "../utils/audio";
+import { 
+  USN_REGEX, 
+  getStoredStudentUSN, 
+  setStoredStudentUSN, 
+  getStoredStudentName, 
+  setStoredStudentName 
+} from "../services/canteenState";
 
 export default function CheckoutModal({
   isOpen,
@@ -25,8 +30,8 @@ export default function CheckoutModal({
   onConfirmOrder
 }) {
   const [selectedSlot, setSelectedSlot] = useState(null);
-  const [studentName, setStudentName] = useState("Aarav Sharma");
-  const [studentRoll, setStudentRoll] = useState("CS24B012");
+  const [studentName, setStudentName] = useState(() => getStoredStudentName() || "");
+  const [studentRoll, setStudentRoll] = useState(() => getStoredStudentUSN() || "");
   const [instructions, setInstructions] = useState("");
   const [paymentMethod, setPaymentMethod] = useState("UPI");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -34,12 +39,16 @@ export default function CheckoutModal({
   const [slotAdjustedMsg, setSlotAdjustedMsg] = useState("");
   const [alternatives, setAlternatives] = useState(null);
 
-  // Auto-select recommended slot when slots change.
+  // Auto-select recommended slot when slots change and sync stored USN.
   useEffect(() => {
+    if (isOpen) {
+      setStudentRoll(getStoredStudentUSN() || "");
+      setStudentName(getStoredStudentName() || "");
+    }
     if (feasibleSlots.length > 0 && !selectedSlot) {
       setSelectedSlot(feasibleSlots[0]);
     }
-  }, [feasibleSlots, selectedSlot]);
+  }, [isOpen, feasibleSlots, selectedSlot]);
 
   if (!isOpen) return null;
 
@@ -57,10 +66,20 @@ export default function CheckoutModal({
     setSlotAdjustedMsg("");
     setAlternatives(null);
 
+    const cleanUSN = studentRoll.trim().toUpperCase();
+    if (!USN_REGEX.test(cleanUSN)) {
+      setErrorMessage("Please enter a valid college USN (Format: 1GAxxCSxxx, e.g. 1GA24CS012).");
+      return;
+    }
+
     if (hasStockError) {
       setErrorMessage("Please adjust items exceeding available kitchen stock before proceeding.");
       return;
     }
+
+    // Persist USN & optional name
+    setStoredStudentUSN(cleanUSN);
+    setStoredStudentName(studentName);
 
     const chosenSlot = selectedSlot || feasibleSlots[0] || null;
 
@@ -71,7 +90,7 @@ export default function CheckoutModal({
       const result = await onConfirmOrder({
         items: cart,
         studentName: studentName.trim() || "Student",
-        studentRoll: studentRoll.trim() || "UG-2026",
+        studentRoll: cleanUSN,
         pickupSlot: chosenSlot,
         instructions: instructions.trim() || null,
         paymentMethod,
@@ -262,29 +281,29 @@ export default function CheckoutModal({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1.5">
-                  Student Name
+                  Student Name <span className="text-slate-500 font-normal">(Optional)</span>
                 </label>
                 <input
                   type="text"
-                  required
                   value={studentName}
                   onChange={(e) => setStudentName(e.target.value)}
-                  placeholder="Enter full name"
+                  placeholder="e.g. Student Name"
                   className="w-full px-3.5 py-2.5 rounded-xl bg-[#141724] border border-white/[0.08] text-sm text-white focus:outline-none focus:border-amber-500/60"
                 />
               </div>
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1.5">
-                  Student Roll / College ID
+                  Student USN <span className="text-amber-400 font-mono">*</span>
                 </label>
                 <input
                   type="text"
                   required
                   value={studentRoll}
-                  onChange={(e) => setStudentRoll(e.target.value)}
-                  placeholder="e.g. CS24B012"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#141724] border border-white/[0.08] text-sm text-white font-mono focus:outline-none focus:border-amber-500/60"
+                  onChange={(e) => setStudentRoll(e.target.value.toUpperCase())}
+                  placeholder="1GA24CS012"
+                  maxLength={10}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#141724] border border-white/[0.08] text-sm text-white font-mono uppercase tracking-wider focus:outline-none focus:border-amber-500/60"
                 />
               </div>
             </div>

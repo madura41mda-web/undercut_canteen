@@ -4,15 +4,19 @@ import {
   PlusCircle, 
   X, 
   Zap, 
-  Image as ImageIcon, 
   CheckCircle2, 
   AlertCircle, 
   IndianRupee, 
   Hash, 
-  Loader2 
+  Loader2,
+  Upload
 } from "lucide-react";
+import { supabase } from "../lib/supabaseClient";
 import { QUICK_PREP_MAX_MINUTES } from "../services/canteenState";
 import { sound } from "../utils/audio";
+
+export const DEFAULT_PLACEHOLDER_IMAGE =
+  "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=600&auto=format&fit=crop&q=80";
 
 const DEFAULT_COUNTERS = [
   "Counter 1 (South Specials)",
@@ -44,6 +48,10 @@ export default function AddDishModal({
   const [dailyLimit, setDailyLimit] = useState(40);
   const [description, setDescription] = useState("");
   const [image, setImage] = useState("");
+  const [imageMode, setImageMode] = useState("upload"); // "upload" | "url"
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const fileInputRef = useRef(null);
   const [counter, setCounter] = useState(DEFAULT_COUNTERS[0]);
   const [calories, setCalories] = useState("");
 
@@ -79,6 +87,9 @@ export default function AddDishModal({
       setDailyLimit(40);
       setDescription("");
       setImage("");
+      setImageMode("upload");
+      setIsUploadingImage(false);
+      setUploadError("");
       setCounter(DEFAULT_COUNTERS[0]);
       setCalories("");
       setClientError("");
@@ -123,6 +134,67 @@ export default function AddDishModal({
       }
     }
   }, [isOpen]);
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadError("");
+    setImageError(false);
+
+    // Validate size (up to 2 MB)
+    const MAX_SIZE = 2 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      setUploadError(`File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Maximum allowed size is 2 MB.`);
+      return;
+    }
+
+    // Validate type (jpg, png, webp)
+    const validMimes = ["image/jpeg", "image/png", "image/webp"];
+    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+    const validExts = ["jpg", "jpeg", "png", "webp"];
+
+    if (!validMimes.includes(file.type) && !validExts.includes(ext)) {
+      setUploadError("Unsupported format. Please upload JPG, PNG, or WebP.");
+      return;
+    }
+
+    // Immediate local preview object
+    const localUrl = URL.createObjectURL(file);
+    setImage(localUrl);
+
+    setIsUploadingImage(true);
+    sound.playClick();
+
+    try {
+      const fileName = `${crypto.randomUUID()}.${ext === "jpeg" ? "jpg" : ext}`;
+      const { error } = await supabase.storage
+        .from("dish-images")
+        .upload(fileName, file, {
+          contentType: file.type || "image/jpeg",
+          upsert: false,
+        });
+
+      if (error) {
+        console.warn("Storage upload error:", error);
+        setUploadError(`Storage upload note: ${error.message || "Failed"}. Using local preview.`);
+      } else {
+        const { data: publicUrlData } = supabase.storage
+          .from("dish-images")
+          .getPublicUrl(fileName);
+
+        if (publicUrlData?.publicUrl) {
+          setImage(publicUrlData.publicUrl);
+        }
+      }
+    } catch (err) {
+      console.warn("Upload exception:", err);
+      setUploadError(`Storage notice: ${err.message || "Not available"}. Using local preview.`);
+    } finally {
+      setIsUploadingImage(false);
+      if (e.target) e.target.value = "";
+    }
+  };
 
   const handleSubmit = async (e) => {
     if (e) e.preventDefault();
@@ -183,7 +255,7 @@ export default function AddDishModal({
       dailyLimit: numDailyLimit,
       isVeg,
       description: description.trim(),
-      image: image.trim() || null,
+      image: (image && !imageError) ? image.trim() : DEFAULT_PLACEHOLDER_IMAGE,
       counter: counter.trim(),
       calories: calories ? Number(calories) : null,
     };
@@ -537,52 +609,151 @@ export default function AddDishModal({
                 />
               </div>
 
-              {/* 8. Image URL (optional, with fallback preview) & 9. Counter (optional) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label htmlFor="dish-image" className="block text-xs font-semibold text-slate-300 mb-1.5">
-                    8. Image URL <span className="text-slate-500 font-normal">(Optional)</span>
+              {/* 8. Dish Image (Device Upload or URL) */}
+              <div className="p-4 rounded-2xl bg-[#131624] border border-white/10 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    8. Dish Image <span className="text-slate-500 font-normal">(Device Upload or URL)</span>
                   </label>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-1 p-0.5 bg-black/40 rounded-lg border border-white/10 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sound.playClick();
+                        setImageMode("upload");
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                        imageMode === "upload"
+                          ? "bg-amber-500 text-black font-bold shadow"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      Device Upload
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sound.playClick();
+                        setImageMode("url");
+                      }}
+                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                        imageMode === "url"
+                          ? "bg-amber-500 text-black font-bold shadow"
+                          : "text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      Image URL
+                    </button>
+                  </div>
+                </div>
+
+                {imageMode === "upload" ? (
+                  <div>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                    <div
+                      onClick={() => !isUploadingImage && fileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all ${
+                        uploadError
+                          ? "border-red-500/50 bg-red-950/20"
+                          : isUploadingImage
+                          ? "border-amber-500/50 bg-amber-500/10 cursor-wait"
+                          : "border-white/15 hover:border-amber-500/50 hover:bg-white/[0.02]"
+                      }`}
+                    >
+                      {isUploadingImage ? (
+                        <div className="flex flex-col items-center justify-center py-2 text-amber-400">
+                          <Loader2 className="w-6 h-6 animate-spin mb-2" />
+                          <span className="text-xs font-semibold">Uploading to Supabase Storage...</span>
+                          <span className="text-[10px] text-slate-400 mt-0.5">Bucket: 'dish-images'</span>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-2">
+                          <Upload className="w-6 h-6 text-slate-400 mb-2" />
+                          <span className="text-xs font-semibold text-slate-200">
+                            Upload from device
+                          </span>
+                          <span className="text-[11px] text-slate-400 mt-1">
+                            JPG, PNG, or WebP • Max 2 MB
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    {uploadError && (
+                      <p className="text-[11px] text-red-400 mt-1.5 flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0" /> {uploadError}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div>
                     <input
                       id="dish-image"
                       type="url"
-                      placeholder="https://..."
+                      placeholder="https://images.unsplash.com/..."
                       value={image}
                       onChange={(e) => {
                         setImage(e.target.value);
                         setImageError(false);
                       }}
-                      className="flex-1 px-3 py-2 rounded-xl bg-[#131624] border border-white/10 text-white text-xs focus:outline-none focus:border-amber-500/60 placeholder:text-slate-500"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#0f121d] border border-white/10 text-white text-xs focus:outline-none focus:border-amber-500/60 placeholder:text-slate-500"
                     />
-                    {/* Thumbnail preview */}
-                    <div className="w-10 h-10 rounded-xl bg-slate-800 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center">
-                      {image && !imageError ? (
-                        <img
-                          src={image}
-                          alt="Preview"
-                          onError={() => setImageError(true)}
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <ImageIcon className="w-4 h-4 text-slate-500" />
+                  </div>
+                )}
+
+                {/* Preview and Fallback */}
+                {image && (
+                  <div className="flex items-center gap-3 p-2.5 rounded-xl bg-black/30 border border-white/10">
+                    <div className="w-12 h-12 rounded-lg bg-slate-800 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center relative">
+                      <img
+                        src={imageError ? DEFAULT_PLACEHOLDER_IMAGE : image}
+                        alt="Preview"
+                        onError={() => setImageError(true)}
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold text-white truncate">
+                        {imageMode === "upload" ? "Uploaded Device File" : "Custom Image URL"}
+                      </div>
+                      <div className="text-[10px] text-slate-400 truncate font-mono">
+                        {image}
+                      </div>
+                      {imageError && (
+                        <div className="text-[10px] text-amber-400">
+                          URL failed to load — fallback placeholder image active
+                        </div>
                       )}
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setImage("");
+                        setImageError(false);
+                        setUploadError("");
+                      }}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-white/5 transition-colors"
+                      title="Clear image"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
-                  {imageError && (
-                    <p className="text-[10px] text-amber-400 mt-1">
-                      Image failed to load — fallback icon will be used.
-                    </p>
-                  )}
-                </div>
+                )}
+              </div>
 
-                <div>
-                  <label htmlFor="dish-counter" className="block text-xs font-semibold text-slate-300 mb-1.5">
-                    9. Counter Station <span className="text-slate-500 font-normal">(Optional)</span>
-                  </label>
-                  <select
-                    id="dish-counter"
-                    value={counter}
+              {/* 9. Counter (optional) */}
+              <div>
+                <label htmlFor="dish-counter" className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  9. Counter Station <span className="text-slate-500 font-normal">(Optional)</span>
+                </label>
+                <select
+                  id="dish-counter"
+                  value={counter}
                     onChange={(e) => setCounter(e.target.value)}
                     className="w-full px-3 py-2 rounded-xl bg-[#131624] border border-white/10 text-white text-xs focus:outline-none focus:border-amber-500/60"
                   >
@@ -593,7 +764,6 @@ export default function AddDishModal({
                     ))}
                   </select>
                 </div>
-              </div>
 
               {/* Action Buttons */}
               <div className="pt-4 border-t border-white/[0.08] flex items-center justify-end gap-3">

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import Navbar from "./components/Navbar";
 import StudentHome from "./components/StudentHome";
@@ -9,7 +9,13 @@ import KitchenCommandCenter from "./components/KitchenCommandCenter";
 import ManagerDashboard from "./components/ManagerDashboard";
 import MotionFoodBackground from "./components/MotionFoodBackground";
 import RoleSelectScreen from "./components/RoleSelectScreen";
-import { CanteenService } from "./services/canteenState";
+import OrderConfirmationModal from "./components/OrderConfirmationModal";
+import StudentUSNModal from "./components/StudentUSNModal";
+import { 
+  CanteenService, 
+  getStoredStudentUSN, 
+  getStoredStudentName 
+} from "./services/canteenState";
 import { RoleService, ROLES, can } from "./lib/role";
 import { sound } from "./utils/audio";
 import { RefreshCw, Zap, ShieldCheck, Loader2 } from "lucide-react";
@@ -30,11 +36,24 @@ export default function App() {
   const [cart, setCart] = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [confirmationOrder, setConfirmationOrder] = useState(null);
   const [activeOrderId, setActiveOrderId] = useState(null);
   const [feasibleSlots, setFeasibleSlots] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [realtimeStatus, setRealtimeStatus] = useState("disconnected");
+
+  // ── Student USN Identity State ─────────────────────────────────────────
+  const [studentUSN, setStudentUSN] = useState(() => getStoredStudentUSN() || "");
+  const [_studentName, setStudentName] = useState(() => getStoredStudentName() || "");
+  const [usnModalOpen, setUsnModalOpen] = useState(false);
+
+  // Require USN entry for students before ordering / tracking
+  useEffect(() => {
+    if (currentRole === ROLES.STUDENT && !studentUSN) {
+      setUsnModalOpen(true);
+    }
+  }, [currentRole, studentUSN]);
 
   // ── Sync Role with URL Hash & State ──────────────────────────────────
   useEffect(() => {
@@ -111,10 +130,31 @@ export default function App() {
     unsub = CanteenService.subscribe(syncFromCache);
     boot();
 
+    // Auto-expire sweep every 30 seconds
+    const expiryInterval = setInterval(() => {
+      CanteenService.expirePendingOrders();
+    }, 30000);
+
     return () => {
       if (unsub) unsub();
+      clearInterval(expiryInterval);
     };
   }, []);
+
+  // Chime notification for Manager when new pending counter orders arrive
+  const prevPendingCountRef = useRef(0);
+  useEffect(() => {
+    const pendingCount = orders.filter((o) => o.status === "pending_approval").length;
+    if (pendingCount > prevPendingCountRef.current) {
+      if (
+        currentRole === ROLES.MANAGER ||
+        (currentRole === ROLES.KITCHEN && settings.counterApprover === "kitchen_or_manager")
+      ) {
+        sound.playReadyBell();
+      }
+    }
+    prevPendingCountRef.current = pendingCount;
+  }, [orders, currentRole, settings.counterApprover]);
 
   // ── Pickup slot refresh whenever cart changes ─────────────────────────
   useEffect(() => {
@@ -173,12 +213,13 @@ export default function App() {
   // ── Order confirmation (async) ─────────────────────────────────────────
   const handleConfirmOrder = useCallback(async (orderData) => {
     const result = await CanteenService.createOrder(orderData);
-    if (result.ok) {
+    if (result.ok && result.order) {
       setCart([]);
       setCartOpen(false);
+      setCheckoutOpen(false);
       setActiveOrderId(result.order.id);
       CanteenService.setActiveOrderId(result.order.id);
-      setActiveTab("tracking");
+      setConfirmationOrder(result.order);
     }
     return result;
   }, []);
@@ -189,12 +230,13 @@ export default function App() {
     if (res && !res.ok) {
       console.warn("[App] status update failed:", res);
     }
-  }, []);
-
-  const handleCancelOrder = useCallback(async (orderId, reason) => {
-    const res = await CanteenService.cancelOrder(orderId, reason);
     return res;
   }, []);
+
+  const handleCancelOrder = useCallback(async (orderId, reason, usn = null) => {
+    const res = await CanteenService.cancelOrder(orderId, reason, usn || studentUSN);
+    return res;
+  }, [studentUSN]);
 
   // ── Stock and item updates (async) ────────────────────────────────────
   const handleUpdateStock = useCallback(async (itemId, newStock) => {
@@ -225,6 +267,15 @@ export default function App() {
 
   const handleUnarchiveItem = useCallback(async (itemId) => {
     return await CanteenService.unarchiveMenuItem(itemId);
+  }, []);
+
+  // ── Approvals (async) ─────────────────────────────────────────────────
+  const handleApproveOrder = useCallback(async (orderId) => {
+    return await CanteenService.approveOrder(orderId);
+  }, []);
+
+  const handleRejectOrder = useCallback(async (orderId, reason) => {
+    return await CanteenService.rejectOrder(orderId, reason);
   }, []);
 
   // ── Settings (async) ──────────────────────────────────────────────────
@@ -287,12 +338,24 @@ export default function App() {
         setActiveTab={setActiveTab}
         cartCount={cartCount}
         cartTotal={cartTotal}
-        openCart={() => setCartOpen(true)}
+        openCart={() => {
+          if (!studentUSN && currentRole === ROLES.STUDENT) {
+            setUsnModalOpen(true);
+            return;
+          }
+          setCartOpen(true);
+        }}
         activeOrder={activeOrder}
         kitchenLoad={kitchenLoad}
         currentRole={currentRole}
+        studentUSN={studentUSN}
+        onChangeUSN={() => setUsnModalOpen(true)}
         onSwitchRole={() => {
-          RoleService.setRole(null);
+          RoleService.logout();
+          setCurrentRole(null);
+        }}
+        onLogout={() => {
+          RoleService.logout();
           setCurrentRole(null);
         }}
         realtimeStatus={realtimeStatus}
@@ -324,10 +387,28 @@ export default function App() {
                 <StudentHome
                   menu={menu}
                   cart={cart}
-                  onAddToCart={handleAddToCart}
+                  studentUSN={studentUSN}
+                  onAddToCart={(item) => {
+                    if (!studentUSN) {
+                      setUsnModalOpen(true);
+                    }
+                    handleAddToCart(item);
+                  }}
                   onUpdateCartQuantity={handleUpdateCartQuantity}
-                  onOpenCart={() => setCartOpen(true)}
-                  onNavigateToTracking={() => setActiveTab("tracking")}
+                  onOpenCart={() => {
+                    if (!studentUSN) {
+                      setUsnModalOpen(true);
+                      return;
+                    }
+                    setCartOpen(true);
+                  }}
+                  onNavigateToTracking={() => {
+                    if (!studentUSN) {
+                      setUsnModalOpen(true);
+                      return;
+                    }
+                    setActiveTab("tracking");
+                  }}
                   activeOrder={activeOrder}
                   orders={orders}
                   kitchenCapacity={maxCapacity}
@@ -347,14 +428,13 @@ export default function App() {
                 <OrderTracking
                   orders={orders}
                   activeOrderId={activeOrderId}
+                  studentUSN={studentUSN}
                   onSelectOrder={(id) => {
                     setActiveOrderId(id);
                     CanteenService.setActiveOrderId(id);
                   }}
-                  onUpdateStatus={handleUpdateOrderStatus}
                   onCancelOrder={handleCancelOrder}
                   onNewOrderClick={() => setActiveTab("student")}
-                  onDemoReset={handleDemoReset}
                 />
               </motion.div>
             )}
@@ -397,6 +477,8 @@ export default function App() {
                   onUpdateMenuItem={handleUpdateMenuItem}
                   onArchiveItem={handleArchiveItem}
                   onUnarchiveItem={handleUnarchiveItem}
+                  onApproveOrder={handleApproveOrder}
+                  onRejectOrder={handleRejectOrder}
                 />
               </motion.div>
             )}
@@ -428,6 +510,37 @@ export default function App() {
           cart={cart}
           feasibleSlots={feasibleSlots}
           onConfirmOrder={handleConfirmOrder}
+        />
+      )}
+
+      {/* Order Placed Confirmation Screen */}
+      <OrderConfirmationModal
+        isOpen={!!confirmationOrder}
+        onClose={() => {
+          setConfirmationOrder(null);
+          setActiveTab("tracking");
+        }}
+        order={confirmationOrder}
+        onTrackOrder={(orderId) => {
+          setConfirmationOrder(null);
+          setActiveOrderId(orderId);
+          setActiveTab("tracking");
+        }}
+      />
+
+      {/* Student USN Modal */}
+      {currentRole === ROLES.STUDENT && (
+        <StudentUSNModal
+          isOpen={usnModalOpen || !studentUSN}
+          canDismiss={!!studentUSN}
+          onClose={() => {
+            if (studentUSN) setUsnModalOpen(false);
+          }}
+          onSave={(usn, name) => {
+            setStudentUSN(usn);
+            setStudentName(name);
+            setUsnModalOpen(false);
+          }}
         />
       )}
 
