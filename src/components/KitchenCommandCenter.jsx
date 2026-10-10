@@ -1,32 +1,33 @@
 import { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  ChefHat, 
-  Clock, 
-  Flame, 
-  CheckCircle2, 
-  AlertTriangle, 
-  PackageCheck, 
-  Layers, 
-  SlidersHorizontal, 
-  Volume2, 
-  ArrowRight,
-  Sparkles,
-  Zap,
-  TrendingUp,
+import {
+  ChefHat,
+  Flame,
+  CheckCircle2,
+  PackageCheck,
+  SlidersHorizontal,
+  PlusCircle,
+  Archive,
+  RotateCcw,
   X
 } from "lucide-react";
 import { sound } from "../utils/audio";
+import AddDishModal from "./AddDishModal";
+import { can } from "../lib/role";
 
 export default function KitchenCommandCenter({
   orders = [],
   menu = [],
   onUpdateOrderStatus,
   onUpdateStock,
+  onAddDish,
+  onArchiveItem,
+  onUnarchiveItem,
   detectedBatches = [],
   kitchenCapacity = 12
 }) {
   const [stockDrawerOpen, setStockDrawerOpen] = useState(false);
+  const [addDishModalOpen, setAddDishModalOpen] = useState(false);
 
   // Group orders by status
   const queuedOrders = useMemo(() => orders.filter(o => o.status === "Placed" || o.status === "Accepted"), [orders]);
@@ -98,6 +99,20 @@ export default function KitchenCommandCenter({
               />
             </div>
           </div>
+
+          {/* Add Dish Button */}
+          {can("dish:add") && (
+            <button
+              onClick={() => {
+                sound.playClick();
+                setAddDishModalOpen(true);
+              }}
+              className="flex items-center gap-2 px-4 py-3 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black text-xs sm:text-sm font-extrabold shadow-lg shadow-amber-500/20 transition-all active:scale-95"
+            >
+              <PlusCircle className="w-4 h-4 text-black" />
+              <span>Add Dish</span>
+            </button>
+          )}
 
           {/* Quick Stock Management Toggle Button */}
           <button
@@ -412,50 +427,95 @@ export default function KitchenCommandCenter({
                 </p>
 
                 <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
-                  {menu.map((item) => (
-                    <div
-                      key={item.id}
-                      className="p-3 rounded-xl bg-[#131624] border border-white/[0.06] flex items-center justify-between gap-3"
-                    >
-                      <div className="flex items-center gap-3">
-                        <img
-                          src={item.image}
-                          alt={item.name}
-                          className="w-10 h-10 rounded-lg object-cover bg-slate-800"
-                        />
-                        <div>
-                          <div className="font-bold text-white text-xs">{item.name}</div>
-                          <div className="text-[10px] text-slate-400 font-mono">
-                            Stock: <strong className={item.stock === 0 ? "text-red-400" : "text-amber-400"}>{item.stock} left</strong>
+                  {menu.map((item) => {
+                    const isArchived = item.isActive === false;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                          isArchived
+                            ? "bg-[#10121a]/90 border-white/[0.04] opacity-75"
+                            : "bg-[#131624] border-white/[0.06]"
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={item.image}
+                            alt={item.name}
+                            className="w-10 h-10 rounded-lg object-cover bg-slate-800"
+                          />
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-white text-xs">{item.name}</span>
+                              {isArchived && (
+                                <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-zinc-800 text-zinc-400 border border-zinc-700">
+                                  Archived
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono">
+                              Stock: <strong className={item.stock === 0 ? "text-red-400" : "text-amber-400"}>{item.stock} left</strong>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      <div className="flex items-center gap-2">
-                        {item.stock > 0 ? (
-                          <button
-                            onClick={async () => {
-                              sound.playClick();
-                              await onUpdateStock(item.id, 0);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 hover:bg-red-900/60 text-xs font-bold transition-colors"
-                          >
-                            Mark 86 / Sold Out
-                          </button>
-                        ) : (
-                          <button
-                            onClick={async () => {
-                              sound.playClick();
-                              await onUpdateStock(item.id, 15);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60 text-xs font-bold transition-colors"
-                          >
-                            Restock (+15)
-                          </button>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {!isArchived && (
+                            item.stock > 0 ? (
+                              <button
+                                onClick={async () => {
+                                  sound.playClick();
+                                  await onUpdateStock(item.id, 0);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-red-950/60 border border-red-500/40 text-red-300 hover:bg-red-900/60 text-xs font-bold transition-colors"
+                              >
+                                Mark 86
+                              </button>
+                            ) : (
+                              <button
+                                onClick={async () => {
+                                  sound.playClick();
+                                  await onUpdateStock(item.id, 15);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60 text-xs font-bold transition-colors"
+                              >
+                                Restock (+15)
+                              </button>
+                            )
+                          )}
+
+                          {/* Manager-only Archive / Unarchive capability */}
+                          {can("dish:archive") && (
+                            isArchived ? (
+                              <button
+                                onClick={async () => {
+                                  sound.playClick();
+                                  if (onUnarchiveItem) await onUnarchiveItem(item.id);
+                                }}
+                                className="px-2 py-1.5 rounded-lg bg-blue-950/60 border border-blue-500/40 text-blue-300 hover:bg-blue-900/60 text-xs font-semibold flex items-center gap-1 transition-colors"
+                                title="Restore item to menu"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>Unarchive</span>
+                              </button>
+                            ) : (
+                              <button
+                                onClick={async () => {
+                                  sound.playClick();
+                                  if (onArchiveItem) await onArchiveItem(item.id);
+                                }}
+                                className="px-2 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-600/50 text-zinc-300 hover:bg-zinc-700/80 text-xs font-semibold flex items-center gap-1 transition-colors"
+                                title="Hide item from students"
+                              >
+                                <Archive className="w-3 h-3" />
+                                <span>Archive</span>
+                              </button>
+                            )
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
 
                 <div className="mt-5 pt-3 border-t border-white/[0.08] text-right">
@@ -471,6 +531,14 @@ export default function KitchenCommandCenter({
           </div>
         )}
       </AnimatePresence>
+
+      {/* Add Dish Modal */}
+      <AddDishModal
+        isOpen={addDishModalOpen}
+        onClose={() => setAddDishModalOpen(false)}
+        onAddDish={onAddDish}
+        existingMenu={menu}
+      />
 
     </div>
   );

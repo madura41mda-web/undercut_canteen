@@ -2,16 +2,16 @@ import { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
   Search, 
-  Sparkles, 
   Clock, 
   Flame, 
   Zap, 
   CheckCircle2, 
   ArrowRight,
   Filter,
-  TrendingUp,
-  ShieldCheck
+  TrendingUp, 
+  ShieldCheck 
 } from "lucide-react";
+import { QUICK_PREP_MAX_MINUTES } from "../services/canteenState";
 import FoodCard from "./FoodCard";
 import { CATEGORIES } from "../data/mockMenu";
 import { sound } from "../utils/audio";
@@ -23,7 +23,10 @@ export default function StudentHome({
   onUpdateCartQuantity,
   onOpenCart,
   onNavigateToTracking,
-  activeOrder
+  activeOrder,
+  orders = [],
+  kitchenCapacity = 12,
+  detectedBatches = []
 }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Items");
@@ -34,16 +37,25 @@ export default function StudentHome({
   const totalCartItems = cart.reduce((acc, i) => acc + i.quantity, 0);
   const totalCartPrice = cart.reduce((acc, i) => acc + i.price * i.quantity, 0);
 
-  // Filtered menu items
+  // Computed live operational stats
+  const activeOrdersCount = useMemo(() => {
+    return orders.filter(o => o.status !== "Collected" && o.status !== "Cancelled").length;
+  }, [orders]);
+  const loadPercentage = Math.min(100, Math.round((activeOrdersCount / kitchenCapacity) * 100));
+  const loadLabel = loadPercentage >= 75 ? "Heavy Rush" : loadPercentage >= 40 ? "Moderate" : "Light";
+
+  // Filtered menu items (Archived dishes hidden from students)
   const filteredItems = useMemo(() => {
     return menu.filter((item) => {
+      if (item.isActive === false) return false;
+
       const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                            item.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                            (item.description && item.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
                             item.category.toLowerCase().includes(searchQuery.toLowerCase());
       
       const matchesCategory = selectedCategory === "All Items" || item.category === selectedCategory;
       const matchesAvailable = onlyAvailable ? item.stock > 0 : true;
-      const matchesFastPrep = fastPrepOnly ? item.prepTimeMinutes <= 8 : true;
+      const matchesFastPrep = fastPrepOnly ? item.prepTimeMinutes <= QUICK_PREP_MAX_MINUTES : true;
 
       return matchesSearch && matchesCategory && matchesAvailable && matchesFastPrep;
     });
@@ -113,7 +125,7 @@ export default function StudentHome({
               <TrendingUp className="w-3.5 h-3.5" />
               <span>KITCHEN LOAD</span>
             </div>
-            <div className="text-lg font-bold text-white font-mono">Moderate (58%)</div>
+            <div className="text-lg font-bold text-white font-mono">{loadLabel} ({loadPercentage}%)</div>
             <div className="text-[11px] text-emerald-400">Slots on schedule</div>
           </div>
 
@@ -131,7 +143,7 @@ export default function StudentHome({
               <Flame className="w-3.5 h-3.5" />
               <span>SMART BATCHING</span>
             </div>
-            <div className="text-lg font-bold text-white font-mono">Active (4 Batches)</div>
+            <div className="text-lg font-bold text-white font-mono">{detectedBatches.length > 0 ? `Active (${detectedBatches.length} Batches)` : "Idle (0 Batches)"}</div>
             <div className="text-[11px] text-purple-300">Synchronized cooking</div>
           </div>
         </motion.div>
@@ -219,7 +231,7 @@ export default function StudentHome({
                 }`}
               >
                 <Clock className="w-3.5 h-3.5" />
-                <span>Quick Prep (≤ 8 mins)</span>
+                <span>Quick Prep (≤ {QUICK_PREP_MAX_MINUTES} mins)</span>
               </button>
             </div>
           </div>

@@ -5,14 +5,16 @@
  *  - Synchronous reads:  getMenu(), getOrders(), getSettings(), getActiveOrder()
  *  - Async writes:       createOrder(), updateOrderStatus(), cancelOrder(),
  *                        updateMenuItemStock(), updateMenuItem(), updateSettings(),
- *                        restockItem(), demoReset()
- *  - Slot generation:    calculateFeasibleSlots() — now async, returns a Promise<Slot[]>
- *  - Batch detection:    detectBatches() — still synchronous, derived from in-memory orders
+ *                        restockItem(), demoReset(), addMenuItem(), archiveMenuItem(), unarchiveMenuItem()
+ *  - Slot generation:    calculateFeasibleSlots() — async, returns a Promise<Slot[]>
+ *  - Batch detection:    detectBatches() — synchronous, derived from in-memory orders
  *
  * Row → camelCase adapter keeps all component field references intact.
  */
 
 import { supabase } from "../lib/supabaseClient";
+
+export const QUICK_PREP_MAX_MINUTES = 8;
 
 // ─────────────────────────────────────────────
 // Row-to-camelCase adapters
@@ -124,11 +126,22 @@ let _activeOrderId = null; // token-style id  e.g. "CN-0001"
 let _changeListeners = [];
 let _initialized = false;
 let _initPromise = null;
+let _realtimeStatus = "disconnected"; // "connected" | "reconnecting" | "disconnected"
 
 function notify() {
   _changeListeners.forEach((fn) => fn());
   // Keep the legacy event alive so any component that still listens still works.
   window.dispatchEvent(new CustomEvent("canteen_state_change"));
+}
+
+function _dedupeMenu(items) {
+  const map = new Map();
+  items.forEach((item) => {
+    if (item && item.id) {
+      map.set(item.id, item);
+    }
+  });
+  return Array.from(map.values());
 }
 
 // ─────────────────────────────────────────────
@@ -158,7 +171,7 @@ async function _loadAll() {
     itemsByOrder[oi.order_id].push(oi);
   });
 
-  _menu = (menuRes.data ?? []).map(adaptMenuItem);
+  _menu = _dedupeMenu((menuRes.data ?? []).map(adaptMenuItem));
   _orders = (ordersRes.data ?? []).map((o) =>
     adaptOrder({ ...o, items: itemsByOrder[o.id] ?? [] })
   );
@@ -170,7 +183,7 @@ function _setupRealtime() {
     .channel("smartcanteen-realtime")
     .on("postgres_changes", { event: "*", schema: "public", table: "menu_items" }, async () => {
       const { data } = await supabase.from("menu_items").select("*").order("id");
-      _menu = (data ?? []).map(adaptMenuItem);
+      _menu = _dedupeMenu((data ?? []).map(adaptMenuItem));
       notify();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, async () => {
@@ -209,7 +222,19 @@ function _setupRealtime() {
       _settings = adaptSettings(data);
       notify();
     })
-    .subscribe();
+    .subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        const wasReconnecting = _realtimeStatus === "reconnecting";
+        _realtimeStatus = "connected";
+        if (wasReconnecting) {
+          _loadAll().then(notify);
+        }
+        notify();
+      } else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        _realtimeStatus = "reconnecting";
+        notify();
+      }
+    });
 }
 
 // ─────────────────────────────────────────────
@@ -241,6 +266,10 @@ export const CanteenService = {
 
   isReady() {
     return _initialized;
+  },
+
+  getRealtimeStatus() {
+    return _realtimeStatus;
   },
 
   // ── Synchronous reads (in-memory cache) ────────────────────────────
@@ -287,8 +316,6 @@ export const CanteenService = {
       quantity: i.quantity,
     }));
 
-    // Convert the slot time string back to a timestamptz.
-    // pickupSlot.slot_at is set by the backend if available; otherwise derive from display time.
     let pickupTime = null;
     if (pickupSlot?.slot_at) {
       pickupTime = pickupSlot.slot_at;
@@ -325,7 +352,6 @@ export const CanteenService = {
     // Adapt the returned order and add to cache immediately.
     const adaptedOrder = adaptOrder(result.order);
     _activeOrderId = adaptedOrder.id;
-    // Realtime subscription will update _orders; return immediately.
     return {
       ok: true,
       order: adaptedOrder,
@@ -336,7 +362,6 @@ export const CanteenService = {
   // ── Status updates (async) ──────────────────────────────────────────
 
   async updateOrderStatus(orderId, nextStatus) {
-    // orderId may be a token string (CN-0001) or UUID
     const uuid = _resolveUUID(orderId);
     if (!uuid) {
       console.error("[CanteenService] updateOrderStatus: order not found", orderId);
@@ -374,7 +399,10 @@ export const CanteenService = {
       p_id: itemId,
       p_stock: Math.max(0, newStock),
     });
-    if (error) console.error("[CanteenService] updateMenuItemStock error:", error);
+    if (error) {
+      console.error("[CanteenService] updateMenuItemStock error:", error);
+      return { ok: false, error: error.message };
+    }
     return data;
   },
 
@@ -388,8 +416,75 @@ export const CanteenService = {
       p_is_active: updatedItem.isActive != null ? updatedItem.isActive : null,
       p_badge: updatedItem.badge != null ? updatedItem.badge : null,
     });
-    if (error) console.error("[CanteenService] updateMenuItem error:", error);
+    if (error) {
+      console.error("[CanteenService] updateMenuItem error:", error);
+      return { ok: false, error: error.message };
+    }
+    if (data?.ok && data.menu_item) {
+      const adapted = adaptMenuItem(data.menu_item);
+      _menu = _menu.map((m) => (m.id === updatedItem.id ? adapted : m));
+      notify();
+    }
     return data;
+  },
+
+  async addMenuItem(item) {
+    const { data, error } = await supabase.rpc("add_menu_item", {
+      p_name: item.name,
+      p_category: item.category,
+      p_price: Number(item.price),
+      p_prep_minutes: Number(item.prepTimeMinutes),
+      p_daily_limit: Number(item.dailyLimit),
+      p_is_veg: item.isVeg ?? true,
+      p_description: item.description || "",
+      p_image: item.image || null,
+      p_counter: item.counter || null,
+      p_calories: item.calories != null && item.calories !== "" ? Number(item.calories) : null,
+    });
+
+    if (error) {
+      console.error("[CanteenService] add_menu_item error:", error);
+      return { ok: false, error: error.message };
+    }
+
+    const adapted = adaptMenuItem(data);
+    if (adapted) {
+      _menu = _dedupeMenu([adapted, ..._menu]);
+      notify();
+    }
+    return { ok: true, data: adapted };
+  },
+
+  async archiveMenuItem(itemId) {
+    const { data, error } = await supabase.rpc("archive_menu_item", {
+      p_id: itemId,
+    });
+    if (error) {
+      console.error("[CanteenService] archive_menu_item error:", error);
+      return { ok: false, error: error.message };
+    }
+    const adapted = adaptMenuItem(data);
+    if (adapted) {
+      _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      notify();
+    }
+    return { ok: true, data: adapted };
+  },
+
+  async unarchiveMenuItem(itemId) {
+    const { data, error } = await supabase.rpc("unarchive_menu_item", {
+      p_id: itemId,
+    });
+    if (error) {
+      console.error("[CanteenService] unarchive_menu_item error:", error);
+      return { ok: false, error: error.message };
+    }
+    const adapted = adaptMenuItem(data);
+    if (adapted) {
+      _menu = _menu.map((m) => (m.id === itemId ? adapted : m));
+      notify();
+    }
+    return { ok: true, data: adapted };
   },
 
   async restockItem(itemId, amount) {
@@ -397,7 +492,10 @@ export const CanteenService = {
       p_id: itemId,
       p_amount: amount,
     });
-    if (error) console.error("[CanteenService] restockItem error:", error);
+    if (error) {
+      console.error("[CanteenService] restockItem error:", error);
+      return { ok: false, error: error.message };
+    }
     return data;
   },
 
@@ -416,7 +514,10 @@ export const CanteenService = {
       p_auto_accept: newSettings.autoAccept ?? null,
       p_demo_mode: newSettings.demoMode ?? null,
     });
-    if (error) console.error("[CanteenService] updateSettings error:", error);
+    if (error) {
+      console.error("[CanteenService] updateSettings error:", error);
+      return { ok: false, error: error.message };
+    }
     return data;
   },
 
@@ -455,7 +556,6 @@ export const CanteenService = {
       return [];
     }
     if (!data?.ok || !Array.isArray(data.slots)) return [];
-    // Adapt snake_case slot fields to camelCase for components.
     return data.slots.map((s) => ({
       id: s.id,
       slot_at: s.slot_at,
@@ -507,11 +607,9 @@ export const CanteenService = {
 // Helpers
 // ─────────────────────────────────────────────
 
-/** Resolve a token-style id (CN-0001) or UUID to the internal UUID. */
 function _resolveUUID(orderId) {
-  // Check if it looks like a UUID already.
+  if (!orderId) return null;
   if (/^[0-9a-f-]{36}$/.test(orderId)) return orderId;
-  // Otherwise find by token or id field.
   const order = _orders.find((o) => o.id === orderId || o.token === orderId);
   return order?._uuid ?? null;
 }

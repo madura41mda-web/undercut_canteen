@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import Navbar from "./components/Navbar";
 import StudentHome from "./components/StudentHome";
@@ -8,13 +8,22 @@ import OrderTracking from "./components/OrderTracking";
 import KitchenCommandCenter from "./components/KitchenCommandCenter";
 import ManagerDashboard from "./components/ManagerDashboard";
 import MotionFoodBackground from "./components/MotionFoodBackground";
+import RoleSelectScreen from "./components/RoleSelectScreen";
 import { CanteenService } from "./services/canteenState";
+import { RoleService, ROLES, can } from "./lib/role";
 import { sound } from "./utils/audio";
 import { RefreshCw, Zap, ShieldCheck, Loader2 } from "lucide-react";
 import "./App.css";
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("student");
+  const [currentRole, setCurrentRole] = useState(() => RoleService.getRole());
+  const [activeTab, setActiveTab] = useState(() => {
+    const role = RoleService.getRole();
+    if (role === ROLES.KITCHEN) return "kitchen";
+    if (role === ROLES.MANAGER) return "manager";
+    return "student";
+  });
+
   const [menu, setMenu] = useState([]);
   const [orders, setOrders] = useState([]);
   const [settings, setSettings] = useState({});
@@ -25,6 +34,54 @@ export default function App() {
   const [feasibleSlots, setFeasibleSlots] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [realtimeStatus, setRealtimeStatus] = useState("disconnected");
+
+  // ── Sync Role with URL Hash & State ──────────────────────────────────
+  useEffect(() => {
+    function syncRoleFromHash() {
+      const hash = window.location.hash.toLowerCase();
+      let matchedRole = null;
+      if (hash.includes("student")) matchedRole = ROLES.STUDENT;
+      else if (hash.includes("kitchen")) matchedRole = ROLES.KITCHEN;
+      else if (hash.includes("manager")) matchedRole = ROLES.MANAGER;
+
+      if (matchedRole) {
+        if (matchedRole !== RoleService.getRole()) {
+          RoleService.setRole(matchedRole);
+          setCurrentRole(matchedRole);
+        }
+      }
+    }
+
+    syncRoleFromHash();
+    window.addEventListener("hashchange", syncRoleFromHash);
+    const unsubRole = RoleService.subscribe((role) => {
+      setCurrentRole(role);
+    });
+
+    return () => {
+      window.removeEventListener("hashchange", syncRoleFromHash);
+      unsubRole();
+    };
+  }, []);
+
+  // ── Role Security Gating & Redirection (Never render unauthorized tab) ──
+  useEffect(() => {
+    if (!currentRole) return;
+    if (currentRole === ROLES.STUDENT) {
+      if (activeTab !== "student" && activeTab !== "tracking") {
+        setActiveTab("student");
+      }
+    } else if (currentRole === ROLES.KITCHEN) {
+      if (activeTab !== "kitchen") {
+        setActiveTab("kitchen");
+      }
+    } else if (currentRole === ROLES.MANAGER) {
+      if (activeTab !== "manager") {
+        setActiveTab("manager");
+      }
+    }
+  }, [currentRole, activeTab]);
 
   // ── Initial load & Realtime subscription ──────────────────────────────
   useEffect(() => {
@@ -46,6 +103,7 @@ export default function App() {
       setMenu(CanteenService.getMenu());
       setOrders(CanteenService.getOrders());
       setSettings(CanteenService.getSettings());
+      setRealtimeStatus(CanteenService.getRealtimeStatus());
       const active = CanteenService.getActiveOrder();
       if (active) setActiveOrderId(active.id);
     }
@@ -61,10 +119,11 @@ export default function App() {
   // ── Pickup slot refresh whenever cart changes ─────────────────────────
   useEffect(() => {
     if (!cart.length) {
-      setFeasibleSlots([]);
       return;
     }
-    CanteenService.calculateFeasibleSlots(cart).then(setFeasibleSlots);
+    CanteenService.calculateFeasibleSlots(cart).then((slots) => {
+      setFeasibleSlots(slots);
+    });
   }, [cart, orders]);
 
   // ── Derived values ────────────────────────────────────────────────────
@@ -73,6 +132,13 @@ export default function App() {
   const activeOrder =
     orders.find((o) => o.id === activeOrderId) || orders[0] || null;
   const detectedBatches = CanteenService.detectBatches();
+
+  // Computed live kitchen load percentage
+  const maxCapacity = settings.maxKitchenCapacity || 12;
+  const activeOrdersCount = useMemo(() => {
+    return orders.filter((o) => o.status !== "Collected" && o.status !== "Cancelled").length;
+  }, [orders]);
+  const kitchenLoad = Math.min(100, Math.round((activeOrdersCount / maxCapacity) * 100));
 
   // ── Cart operations (synchronous, no backend) ─────────────────────────
   const handleAddToCart = useCallback((item) => {
@@ -114,7 +180,7 @@ export default function App() {
       CanteenService.setActiveOrderId(result.order.id);
       setActiveTab("tracking");
     }
-    return result; // CheckoutModal uses this to show errors / slot adjustments
+    return result;
   }, []);
 
   // ── Status updates (async) ─────────────────────────────────────────────
@@ -135,7 +201,6 @@ export default function App() {
     if (newStock === 0) {
       await CanteenService.updateMenuItemStock(itemId, 0);
     } else {
-      // Restock: use the restock RPC to add the amount.
       const current = menu.find((m) => m.id === itemId);
       const toAdd = newStock - (current?.stock ?? 0);
       if (toAdd > 0) {
@@ -147,7 +212,19 @@ export default function App() {
   }, [menu]);
 
   const handleUpdateMenuItem = useCallback(async (item) => {
-    await CanteenService.updateMenuItem(item);
+    return await CanteenService.updateMenuItem(item);
+  }, []);
+
+  const handleAddDish = useCallback(async (dishPayload) => {
+    return await CanteenService.addMenuItem(dishPayload);
+  }, []);
+
+  const handleArchiveItem = useCallback(async (itemId) => {
+    return await CanteenService.archiveMenuItem(itemId);
+  }, []);
+
+  const handleUnarchiveItem = useCallback(async (itemId) => {
+    return await CanteenService.unarchiveMenuItem(itemId);
   }, []);
 
   // ── Settings (async) ──────────────────────────────────────────────────
@@ -191,8 +268,7 @@ export default function App() {
             {loadError}
           </div>
           <p className="text-xs text-slate-400 mt-3">
-            Create a <code className="text-amber-400">.env</code> file from{" "}
-            <code className="text-amber-400">.env.example</code> with your Supabase URL and anon key.
+            Create a <code className="text-amber-400">.env</code> file with your Supabase URL and anon key.
           </p>
         </div>
       </div>
@@ -213,117 +289,149 @@ export default function App() {
         cartTotal={cartTotal}
         openCart={() => setCartOpen(true)}
         activeOrder={activeOrder}
+        kitchenLoad={kitchenLoad}
+        currentRole={currentRole}
+        onSwitchRole={() => {
+          RoleService.setRole(null);
+          setCurrentRole(null);
+        }}
+        realtimeStatus={realtimeStatus}
       />
 
-      {/* Main Content Area with View Transitions */}
+      {/* Main Content Area */}
       <main className="relative z-10 flex-1">
-        <AnimatePresence mode="wait">
-          {activeTab === "student" && (
-            <motion.div
-              key="student"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.25 }}
-            >
-              <StudentHome
-                menu={menu}
-                cart={cart}
-                onAddToCart={handleAddToCart}
-                onUpdateCartQuantity={handleUpdateCartQuantity}
-                onOpenCart={() => setCartOpen(true)}
-                onNavigateToTracking={() => setActiveTab("tracking")}
-                activeOrder={activeOrder}
-              />
-            </motion.div>
-          )}
+        {/* Role Selection Screen if no role is active */}
+        {!currentRole ? (
+          <RoleSelectScreen
+            onSelectRole={(role) => {
+              RoleService.setRole(role);
+              setCurrentRole(role);
+              if (role === ROLES.KITCHEN) setActiveTab("kitchen");
+              else if (role === ROLES.MANAGER) setActiveTab("manager");
+              else setActiveTab("student");
+            }}
+          />
+        ) : (
+          <AnimatePresence mode="wait">
+            {activeTab === "student" && can("tab:student") && (
+              <motion.div
+                key="student"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.25 }}
+              >
+                <StudentHome
+                  menu={menu}
+                  cart={cart}
+                  onAddToCart={handleAddToCart}
+                  onUpdateCartQuantity={handleUpdateCartQuantity}
+                  onOpenCart={() => setCartOpen(true)}
+                  onNavigateToTracking={() => setActiveTab("tracking")}
+                  activeOrder={activeOrder}
+                  orders={orders}
+                  kitchenCapacity={maxCapacity}
+                  detectedBatches={detectedBatches}
+                />
+              </motion.div>
+            )}
 
-          {activeTab === "tracking" && (
-            <motion.div
-              key="tracking"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.25 }}
-            >
-              <OrderTracking
-                orders={orders}
-                activeOrderId={activeOrderId}
-                onSelectOrder={(id) => {
-                  setActiveOrderId(id);
-                  CanteenService.setActiveOrderId(id);
-                }}
-                onUpdateStatus={handleUpdateOrderStatus}
-                onCancelOrder={handleCancelOrder}
-                onNewOrderClick={() => setActiveTab("student")}
-                onDemoReset={handleDemoReset}
-              />
-            </motion.div>
-          )}
+            {activeTab === "tracking" && can("tab:tracking") && (
+              <motion.div
+                key="tracking"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.25 }}
+              >
+                <OrderTracking
+                  orders={orders}
+                  activeOrderId={activeOrderId}
+                  onSelectOrder={(id) => {
+                    setActiveOrderId(id);
+                    CanteenService.setActiveOrderId(id);
+                  }}
+                  onUpdateStatus={handleUpdateOrderStatus}
+                  onCancelOrder={handleCancelOrder}
+                  onNewOrderClick={() => setActiveTab("student")}
+                  onDemoReset={handleDemoReset}
+                />
+              </motion.div>
+            )}
 
-          {activeTab === "kitchen" && (
-            <motion.div
-              key="kitchen"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.25 }}
-            >
-              <KitchenCommandCenter
-                orders={orders}
-                menu={menu}
-                onUpdateOrderStatus={handleUpdateOrderStatus}
-                onUpdateStock={handleUpdateStock}
-                detectedBatches={detectedBatches}
-                kitchenCapacity={settings.maxKitchenCapacity || 12}
-              />
-            </motion.div>
-          )}
+            {activeTab === "kitchen" && can("tab:kitchen") && (
+              <motion.div
+                key="kitchen"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.25 }}
+              >
+                <KitchenCommandCenter
+                  orders={orders}
+                  menu={menu}
+                  onUpdateOrderStatus={handleUpdateOrderStatus}
+                  onUpdateStock={handleUpdateStock}
+                  onAddDish={handleAddDish}
+                  onArchiveItem={handleArchiveItem}
+                  onUnarchiveItem={handleUnarchiveItem}
+                  detectedBatches={detectedBatches}
+                  kitchenCapacity={maxCapacity}
+                />
+              </motion.div>
+            )}
 
-          {activeTab === "manager" && (
-            <motion.div
-              key="manager"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              transition={{ duration: 0.25 }}
-            >
-              <ManagerDashboard
-                menu={menu}
-                orders={orders}
-                settings={settings}
-                onUpdateSettings={handleUpdateSettings}
-                onUpdateMenuItem={handleUpdateMenuItem}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+            {activeTab === "manager" && can("tab:manager") && (
+              <motion.div
+                key="manager"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.25 }}
+              >
+                <ManagerDashboard
+                  menu={menu}
+                  orders={orders}
+                  settings={settings}
+                  onUpdateSettings={handleUpdateSettings}
+                  onUpdateMenuItem={handleUpdateMenuItem}
+                  onArchiveItem={handleArchiveItem}
+                  onUnarchiveItem={handleUnarchiveItem}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+        )}
       </main>
 
-      {/* Cart Drawer */}
-      <CartDrawer
-        isOpen={cartOpen}
-        onClose={() => setCartOpen(false)}
-        cart={cart}
-        onUpdateQuantity={handleUpdateCartQuantity}
-        onRemoveItem={handleRemoveCartItem}
-        onProceedToCheckout={() => {
-          setCartOpen(false);
-          setCheckoutOpen(true);
-        }}
-        feasibleSlots={feasibleSlots}
-      />
+      {/* Cart Drawer (Students Only) */}
+      {can("cart:access") && (
+        <CartDrawer
+          isOpen={cartOpen}
+          onClose={() => setCartOpen(false)}
+          cart={cart}
+          onUpdateQuantity={handleUpdateCartQuantity}
+          onRemoveItem={handleRemoveCartItem}
+          onProceedToCheckout={() => {
+            setCartOpen(false);
+            setCheckoutOpen(true);
+          }}
+          feasibleSlots={feasibleSlots}
+        />
+      )}
 
-      {/* Checkout Modal */}
-      <CheckoutModal
-        isOpen={checkoutOpen}
-        onClose={() => setCheckoutOpen(false)}
-        cart={cart}
-        feasibleSlots={feasibleSlots}
-        onConfirmOrder={handleConfirmOrder}
-      />
+      {/* Checkout Modal (Students Only) */}
+      {can("order:place") && (
+        <CheckoutModal
+          isOpen={checkoutOpen}
+          onClose={() => setCheckoutOpen(false)}
+          cart={cart}
+          feasibleSlots={feasibleSlots}
+          onConfirmOrder={handleConfirmOrder}
+        />
+      )}
 
-      {/* Modern High-End Footer */}
+      {/* Footer */}
       <footer className="border-t border-white/[0.08] bg-[#07080c] py-10 px-4 sm:px-6 lg:px-8 mt-auto">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6">
           <div className="flex items-center gap-3">
@@ -348,18 +456,20 @@ export default function App() {
             <span>•</span>
             <span>Motion & Spring UI</span>
             <span>•</span>
-            <span>Live Queue Scheduling</span>
+            <span>Role-Separated Architecture</span>
           </div>
 
-          {/* Demo Reset Button */}
-          <button
-            onClick={handleDemoReset}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-slate-400 hover:text-white text-xs font-mono transition-colors border border-white/10"
-            title="Reset all demo orders and restore stock"
-          >
-            <RefreshCw className="w-3 h-3" />
-            <span>Reset Demo Data</span>
-          </button>
+          {/* Reset Demo Data Button (Visible to Kitchen & Manager Only) */}
+          {can("demo:reset") && (
+            <button
+              onClick={handleDemoReset}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-slate-400 hover:text-white text-xs font-mono transition-colors border border-white/10"
+              title="Reset all demo orders and restore stock"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Reset Demo Data</span>
+            </button>
+          )}
         </div>
       </footer>
 
